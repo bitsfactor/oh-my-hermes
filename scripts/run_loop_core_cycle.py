@@ -365,6 +365,25 @@ def recalculate_candidate_state(loop_state: dict[str, Any], queue: dict[str, Any
     )
 
 
+def build_milestone_decision_dossier(entry: dict[str, Any], final_disposition: str, reviewed_at: str) -> OrderedDict:
+    return OrderedDict(
+        {
+            "artifact_type": "milestone_decision_dossier",
+            "queue_id": entry.get("queue_id"),
+            "candidate_id": entry.get("candidate_id"),
+            "classification": entry.get("classification"),
+            "summary": entry.get("summary"),
+            "target_surface": entry.get("target_surface", []),
+            "promotion_decision": entry.get("promotion_decision"),
+            "stop_artifact": entry.get("milestone_stop_artifact"),
+            "review_decision": entry.get("review_decision"),
+            "review_reason": entry.get("review_reason"),
+            "final_disposition": final_disposition,
+            "reviewed_at": reviewed_at,
+        }
+    )
+
+
 def apply_milestone_review_decision(repo_root: Path, queue_id: str, decision: str, decision_reason: str) -> OrderedDict:
     if decision not in MILESTONE_REVIEW_DECISIONS:
         raise ValueError(f"Unsupported milestone review decision: {decision}")
@@ -388,6 +407,7 @@ def apply_milestone_review_decision(repo_root: Path, queue_id: str, decision: st
     reviewed_entry["reviewed_at"] = utc_now()
 
     if decision == "accepted":
+        final_disposition = "applied"
         reviewed_entry["status"] = "applied"
         queue.setdefault("applied", []).append(reviewed_entry)
         prior_operator = dict(loop_state.get("operator_state", {}))
@@ -407,6 +427,7 @@ def apply_milestone_review_decision(repo_root: Path, queue_id: str, decision: st
         candidate_status = "milestone_applied"
         promotion_field = "applied_at"
     elif decision == "rejected":
+        final_disposition = "rejected"
         reviewed_entry["status"] = "rejected"
         queue.setdefault("rejected", []).append(reviewed_entry)
         if loop_state.get("candidate_state", {}).get("candidate_id") == reviewed_entry["candidate_id"]:
@@ -414,12 +435,19 @@ def apply_milestone_review_decision(repo_root: Path, queue_id: str, decision: st
         candidate_status = "milestone_rejected"
         promotion_field = "rejected_at"
     else:
+        final_disposition = "deferred"
         reviewed_entry["status"] = "deferred"
         queue.setdefault("deferred", []).append(reviewed_entry)
         if loop_state.get("candidate_state", {}).get("candidate_id") == reviewed_entry["candidate_id"]:
             loop_state["candidate_state"] = recalculate_candidate_state(loop_state, queue)
         candidate_status = "milestone_deferred"
         promotion_field = "deferred_at"
+
+    reviewed_entry["milestone_decision_dossier"] = build_milestone_decision_dossier(
+        reviewed_entry,
+        final_disposition=final_disposition,
+        reviewed_at=reviewed_entry["reviewed_at"],
+    )
 
     queue["updated_at"] = utc_now()
     dump_json(queue_path, queue)

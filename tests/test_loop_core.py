@@ -239,11 +239,14 @@ def test_review_milestone_queue_entry_accepts_candidate_and_promotes_operator_st
     assert reviewed["queue_id"] == queue_id
     assert reviewed["status"] == "applied"
     assert reviewed["review_decision"] == "accepted"
+    assert reviewed["milestone_decision_dossier"]["artifact_type"] == "milestone_decision_dossier"
+    assert reviewed["milestone_decision_dossier"]["final_disposition"] == "applied"
 
     queue = json.loads((repo_root / ".hermes-flow" / "milestone-queue.json").read_text(encoding="utf-8"))
     assert queue["pending"] == []
     assert len(queue["applied"]) == 1
     assert queue["applied"][0]["review_decision"] == "accepted"
+    assert queue["applied"][0]["milestone_decision_dossier"]["review_reason"] == "milestone review approved this control-plane improvement"
 
     loop_state = json.loads((repo_root / ".hermes-flow" / "loop-core-state.json").read_text(encoding="utf-8"))
     assert loop_state["operator_state"]["state_id"] == cycle_report["candidate"]["candidate_id"]
@@ -301,14 +304,75 @@ def test_review_milestone_queue_entry_rejects_candidate_and_clears_candidate_sta
     reviewed = json.loads(review_proc.stdout)
     assert reviewed["status"] == "rejected"
     assert reviewed["review_decision"] == "rejected"
+    assert reviewed["milestone_decision_dossier"]["final_disposition"] == "rejected"
 
     queue = json.loads((repo_root / ".hermes-flow" / "milestone-queue.json").read_text(encoding="utf-8"))
     assert queue["pending"] == []
     assert len(queue["rejected"]) == 1
+    assert queue["rejected"][0]["milestone_decision_dossier"]["review_reason"] == "milestone review rejected this candidate"
 
     loop_state = json.loads((repo_root / ".hermes-flow" / "loop-core-state.json").read_text(encoding="utf-8"))
     assert loop_state["operator_state"]["state_id"] == "accepted-baseline"
     assert loop_state["candidate_state"] is None
+
+
+def test_review_milestone_queue_entry_defers_candidate_and_records_decision_dossier(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+
+    for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
+        copy_script(repo_root, script_name)
+
+    bootstrap_repo(repo_root)
+
+    cycle_proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--observation",
+            "control-plane thresholds changed under review pressure",
+            "--candidate-summary",
+            "tighten promotion thresholds for control-plane rules",
+            "--classification",
+            "control_plane_policy",
+            "--mode",
+            "delivery",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    cycle_report = json.loads((repo_root / Path(cycle_proc.stdout.strip())).read_text(encoding="utf-8"))
+    queue_id = cycle_report["milestone_queue_entry"]["queue_id"]
+
+    review_proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--review-milestone-queue-id",
+            queue_id,
+            "--review-decision",
+            "deferred",
+            "--review-reason",
+            "wait for another milestone window",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    reviewed = json.loads(review_proc.stdout)
+    assert reviewed["status"] == "deferred"
+    assert reviewed["review_decision"] == "deferred"
+    assert reviewed["milestone_decision_dossier"]["final_disposition"] == "deferred"
+
+    queue = json.loads((repo_root / ".hermes-flow" / "milestone-queue.json").read_text(encoding="utf-8"))
+    assert queue["pending"] == []
+    assert len(queue["deferred"]) == 1
+    assert queue["deferred"][0]["milestone_decision_dossier"]["review_reason"] == "wait for another milestone window"
 
 
 def test_apply_milestone_queue_entry_promotes_candidate_to_operator_state(tmp_path: Path) -> None:
