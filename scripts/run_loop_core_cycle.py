@@ -11,6 +11,8 @@ from typing import Any
 
 LOOP_CORE_STATE_PATH = ".hermes-flow/loop-core-state.json"
 ARTIFACTS_INDEX_PATH = ".hermes-flow/artifacts-index.json"
+VERIFICATION_STATE_PATH = ".hermes-flow/verification-state.json"
+RUN_STATE_PATH = ".hermes-flow/run-state.json"
 DEFAULT_REPORT_PATH = "artifacts/reports/latest-loop-cycle.json"
 DEFAULT_EVIDENCE_REPORT_PATH = "artifacts/reports/latest-execution-evidence.json"
 PROMOTION_LADDER = {
@@ -154,6 +156,26 @@ def build_candidate(summary: str, classification: str, target_file: str = "", au
     return candidate
 
 
+def summarize_task_review_state(task_review_state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "task_ids": sorted(task_review_state.keys()),
+        "has_reviews": bool(task_review_state),
+        "all_clear": bool(task_review_state) and all(bool(item.get("latest_clear", False)) for item in task_review_state.values()),
+        "max_round_count": max((int(item.get("round_count", 0)) for item in task_review_state.values()), default=0),
+        "blocking_bug_count": sum(len(item.get("latest_blocking_bugs", [])) for item in task_review_state.values()),
+    }
+
+
+def summarize_phase_review_state(phase_review_state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "phase_ids": sorted(phase_review_state.keys()),
+        "has_reviews": bool(phase_review_state),
+        "all_clear": bool(phase_review_state) and all(bool(item.get("latest_clear", False)) for item in phase_review_state.values()),
+        "max_round_count": max((int(item.get("round_count", 0)) for item in phase_review_state.values()), default=0),
+        "blocking_bug_count": sum(len(item.get("latest_blocking_bugs", [])) for item in phase_review_state.values()),
+    }
+
+
 def ingest_execution_evidence(repo_root: Path, evidence_path: str, report_path: str) -> tuple[OrderedDict, Path]:
     source_path = (repo_root / evidence_path).resolve()
     evidence = load_json(source_path)
@@ -181,6 +203,71 @@ def ingest_execution_evidence(repo_root: Path, evidence_path: str, report_path: 
     dump_json(final_report_path, ingested)
     append_artifact(repo_root, "execution_evidence_report", str(final_report_path), "omh-loop-core-runner-v1")
     return ingested, final_report_path
+
+
+def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, str, str, str]:
+    run_state = load_json(repo_root / RUN_STATE_PATH)
+    verification_state = load_json(repo_root / VERIFICATION_STATE_PATH)
+
+    task_summary = summarize_task_review_state(verification_state.get("task_review_state", {}))
+    phase_summary = summarize_phase_review_state(verification_state.get("phase_review_state", {}))
+    verification_summary = OrderedDict(
+        {
+            "task_checks_passed": sum(1 for item in verification_state.get("task_checks", []) if item.get("result") == "pass"),
+            "phase_checks_passed": sum(1 for item in verification_state.get("phase_checks", []) if item.get("result") == "pass"),
+            "integration_checks_passed": sum(1 for item in verification_state.get("integration_checks", []) if item.get("result") == "pass"),
+            "artifact_checks_passed": sum(1 for item in verification_state.get("artifact_checks", []) if item.get("result") == "pass"),
+            "final_acceptance_passed": sum(1 for item in verification_state.get("final_acceptance", []) if item.get("result") == "pass"),
+            "has_final_acceptance_evidence": bool(verification_state.get("final_acceptance", [])),
+            "has_explicit_acceptance_gap": any(item.get("result") == "fail" for item in verification_state.get("final_acceptance", [])),
+            "has_ambiguous_acceptance_state": any(item.get("result") not in {"pass", "fail"} for item in verification_state.get("final_acceptance", [])),
+        }
+    )
+    evidence = OrderedDict(
+        {
+            "source": "repo_state",
+            "run_state": OrderedDict(
+                {
+                    "workflow_stage": run_state.get("workflow_stage"),
+                    "status": run_state.get("status"),
+                    "active_phase_id": run_state.get("active_phase_id"),
+                    "active_task_id": run_state.get("active_task_id"),
+                    "mode": run_state.get("mode"),
+                }
+            ),
+            "task_review_summary": task_summary,
+            "phase_review_summary": phase_summary,
+            "verification_summary": verification_summary,
+            "captured_at": utc_now(),
+        }
+    )
+
+    observation = (
+        f"repo-state ingest: workflow_stage={run_state.get('workflow_stage')}; "
+        f"status={run_state.get('status')}; task_blocking_bugs={task_summary['blocking_bug_count']}; "
+        f"phase_blocking_bugs={phase_summary['blocking_bug_count']}"
+    )
+
+    if task_summary["blocking_bug_count"] or phase_summary["blocking_bug_count"]:
+        candidate_summary = "tighten review and verification governance based on repo-state blockers"
+        classification = "control_plane_policy"
+    elif (
+        task_summary["has_reviews"]
+        and phase_summary["has_reviews"]
+        and task_summary["all_clear"]
+        and phase_summary["all_clear"]
+        and verification_summary["has_final_acceptance_evidence"]
+        and verification_summary["has_explicit_acceptance_gap"]
+        and not verification_summary["has_ambiguous_acceptance_state"]
+        and verification_summary["final_acceptance_passed"] == 0
+    ):
+        candidate_summary = "improve internal operating rule to close remaining acceptance gap"
+        classification = "internal_operating_rule"
+    else:
+        candidate_summary = "record stable repo-state signal without changing contract semantics"
+        classification = "control_plane_policy"
+
+    return evidence, observation, candidate_summary, classification
 
 
 def run_cycle(
@@ -276,41 +363,58 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one governed 回环核心 cycle for omh.")
     parser.add_argument("--observation", help="Observed runtime or design signal.")
     parser.add_argument("--candidate-summary", help="Proposed improvement summary.")
-    parser.add_argument("--classification", default="internal_operating_rule", help="Candidate classification.")
+    parser.add_argument("--classification", default=None, help="Candidate classification.")
     parser.add_argument("--mode", default="governance-hardening", help="Loop operating mode.")
     parser.add_argument("--report-path", default=DEFAULT_REPORT_PATH, help="Relative path for cycle report JSON.")
     parser.add_argument("--promotion-decision", choices=sorted(PROMOTION_LADDER), help="Force a promotion-ladder decision.")
     parser.add_argument("--evidence-path", help="Relative path to execution evidence JSON to ingest.")
     parser.add_argument("--evidence-report-path", default=DEFAULT_EVIDENCE_REPORT_PATH, help="Relative path for ingested evidence report JSON.")
+    parser.add_argument("--ingest-repo-state", action="store_true", help="Derive observation/candidate/evidence from .hermes-flow repo state.")
     args = parser.parse_args()
+    if args.ingest_repo_state:
+        if args.evidence_path or args.observation or args.candidate_summary or args.promotion_decision or args.classification is not None:
+            parser.error("--ingest-repo-state cannot be combined with --evidence-path, --observation, --candidate-summary, --promotion-decision, or an explicit --classification override.")
+        return args
+    if args.classification is None:
+        args.classification = "internal_operating_rule"
     if args.evidence_path and not args.observation:
         args.observation = "execution evidence ingested"
     if args.evidence_path and not args.candidate_summary:
         args.candidate_summary = "derive loop-core improvement from ingested execution evidence"
     if not args.observation or not args.candidate_summary:
-        parser.error("Either provide --observation and --candidate-summary, or provide --evidence-path to auto-ingest evidence.")
+        parser.error("Either provide --observation and --candidate-summary, provide --evidence-path to auto-ingest evidence, or use --ingest-repo-state.")
     return args
 
 
 def main() -> int:
     args = parse_args()
     repo_root = find_repo_root(Path.cwd())
+
+    evidence = None
+    observation = args.observation
+    candidate_summary = args.candidate_summary
+    classification = args.classification
+
+    if args.ingest_repo_state:
+        evidence, observation, candidate_summary, classification = build_loop_candidate_from_repo_state(repo_root)
+
     validate_cycle_request(
         repo_root,
-        classification=args.classification,
+        classification=classification,
         requested_decision=args.promotion_decision,
         report_path=args.report_path,
         evidence_path=args.evidence_path,
         evidence_report_path=args.evidence_report_path if args.evidence_path else None,
     )
-    evidence = None
+
     if args.evidence_path:
         evidence, _ = ingest_execution_evidence(repo_root, args.evidence_path, args.evidence_report_path)
+
     report_path = run_cycle(
         repo_root,
-        observation=args.observation,
-        candidate_summary=args.candidate_summary,
-        classification=args.classification,
+        observation=observation,
+        candidate_summary=candidate_summary,
+        classification=classification,
         mode=args.mode,
         report_path=args.report_path,
         requested_decision=args.promotion_decision,

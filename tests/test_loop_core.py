@@ -12,6 +12,16 @@ def copy_script(repo_root: Path, script_name: str) -> None:
     target_script.write_text(source_script.read_text(encoding="utf-8"), encoding="utf-8")
 
 
+def bootstrap_repo(repo_root: Path) -> None:
+    subprocess.run(
+        ["python3", str(repo_root / "scripts" / "bootstrap_omh.py")],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
 def test_bootstrap_omh_creates_loop_core_state(tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
@@ -27,12 +37,16 @@ def test_bootstrap_omh_creates_loop_core_state(tmp_path: Path) -> None:
         check=True,
     )
 
-    assert "validated_json_count=3" in proc.stdout
+    assert "validated_json_count=4" in proc.stdout
     loop_state = json.loads((repo_root / ".hermes-flow" / "loop-core-state.json").read_text(encoding="utf-8"))
     assert loop_state["core_name"] == "回环核心"
     assert loop_state["current_mode"] == "governance-hardening"
     assert loop_state["observations"] == []
     assert loop_state["operator_state"]["state_id"] == "accepted-baseline"
+
+    verification_state = json.loads((repo_root / ".hermes-flow" / "verification-state.json").read_text(encoding="utf-8"))
+    assert verification_state["task_review_state"] == {}
+    assert verification_state["phase_review_state"] == {}
 
 
 def test_run_loop_core_cycle_internal_promotion_updates_operator_state(tmp_path: Path) -> None:
@@ -43,13 +57,7 @@ def test_run_loop_core_cycle_internal_promotion_updates_operator_state(tmp_path:
     for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
         copy_script(repo_root, script_name)
 
-    subprocess.run(
-        ["python3", str(repo_root / "scripts" / "bootstrap_omh.py")],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    bootstrap_repo(repo_root)
 
     proc = subprocess.run(
         [
@@ -96,13 +104,7 @@ def test_run_loop_core_cycle_control_plane_policy_requires_milestone_review(tmp_
     for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
         copy_script(repo_root, script_name)
 
-    subprocess.run(
-        ["python3", str(repo_root / "scripts" / "bootstrap_omh.py")],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    bootstrap_repo(repo_root)
 
     proc = subprocess.run(
         [
@@ -136,13 +138,7 @@ def test_run_loop_core_cycle_rejects_downgraded_explicit_promotion_for_control_p
     for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
         copy_script(repo_root, script_name)
 
-    subprocess.run(
-        ["python3", str(repo_root / "scripts" / "bootstrap_omh.py")],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    bootstrap_repo(repo_root)
 
     proc = subprocess.run(
         [
@@ -174,13 +170,7 @@ def test_run_loop_core_cycle_rejects_unknown_classification(tmp_path: Path) -> N
     for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
         copy_script(repo_root, script_name)
 
-    subprocess.run(
-        ["python3", str(repo_root / "scripts" / "bootstrap_omh.py")],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    bootstrap_repo(repo_root)
 
     proc = subprocess.run(
         [
@@ -210,13 +200,7 @@ def test_run_loop_core_cycle_rejects_report_path_outside_repo(tmp_path: Path) ->
     for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
         copy_script(repo_root, script_name)
 
-    subprocess.run(
-        ["python3", str(repo_root / "scripts" / "bootstrap_omh.py")],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    bootstrap_repo(repo_root)
 
     proc = subprocess.run(
         [
@@ -251,13 +235,7 @@ def test_run_loop_core_cycle_rejects_evidence_report_path_outside_repo(tmp_path:
     for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
         copy_script(repo_root, script_name)
 
-    subprocess.run(
-        ["python3", str(repo_root / "scripts" / "bootstrap_omh.py")],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    bootstrap_repo(repo_root)
 
     proc = subprocess.run(
         [
@@ -292,13 +270,7 @@ def test_run_loop_core_cycle_rejects_evidence_path_outside_repo(tmp_path: Path) 
     for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
         copy_script(repo_root, script_name)
 
-    subprocess.run(
-        ["python3", str(repo_root / "scripts" / "bootstrap_omh.py")],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    bootstrap_repo(repo_root)
 
     proc = subprocess.run(
         [
@@ -326,13 +298,7 @@ def test_invalid_evidence_driven_request_fails_closed_without_artifact_mutation(
     for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
         copy_script(repo_root, script_name)
 
-    subprocess.run(
-        ["python3", str(repo_root / "scripts" / "bootstrap_omh.py")],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    bootstrap_repo(repo_root)
 
     evidence_dir = repo_root / "artifacts" / "generated"
     evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -371,13 +337,7 @@ def test_run_loop_core_cycle_rejects_downgraded_explicit_promotion_for_contract_
     for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
         copy_script(repo_root, script_name)
 
-    subprocess.run(
-        ["python3", str(repo_root / "scripts" / "bootstrap_omh.py")],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    bootstrap_repo(repo_root)
 
     proc = subprocess.run(
         [
@@ -409,13 +369,7 @@ def test_run_loop_core_cycle_ingests_execution_evidence_and_requires_user_decisi
     for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
         copy_script(repo_root, script_name)
 
-    subprocess.run(
-        ["python3", str(repo_root / "scripts" / "bootstrap_omh.py")],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    bootstrap_repo(repo_root)
 
     evidence_dir = repo_root / "artifacts" / "generated"
     evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -460,3 +414,371 @@ def test_run_loop_core_cycle_ingests_execution_evidence_and_requires_user_decisi
     loop_state = json.loads((repo_root / ".hermes-flow" / "loop-core-state.json").read_text(encoding="utf-8"))
     assert loop_state["candidate_state"]["classification"] == "product_contract_rule"
     assert loop_state["operator_state"]["state_id"] == "accepted-baseline"
+
+
+def test_run_loop_core_cycle_rejects_repo_state_with_explicit_classification_override(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+
+    for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
+        copy_script(repo_root, script_name)
+
+    bootstrap_repo(repo_root)
+
+    proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--ingest-repo-state",
+            "--classification",
+            "internal_operating_rule",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode != 0
+    assert "cannot be combined" in proc.stderr
+
+
+def test_run_loop_core_cycle_rejects_repo_state_with_manual_promotion_override(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+
+    for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
+        copy_script(repo_root, script_name)
+
+    bootstrap_repo(repo_root)
+
+    proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--ingest-repo-state",
+            "--promotion-decision",
+            "internal_promotion",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode != 0
+    assert "cannot be combined" in proc.stderr
+
+
+def test_run_loop_core_cycle_rejects_mixed_repo_state_and_evidence_inputs(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+
+    for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
+        copy_script(repo_root, script_name)
+
+    bootstrap_repo(repo_root)
+
+    evidence_dir = repo_root / "artifacts" / "generated"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    evidence_path = evidence_dir / "execution-evidence.json"
+    evidence_path.write_text(json.dumps({"signal": "mixed"}), encoding="utf-8")
+
+    proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--ingest-repo-state",
+            "--evidence-path",
+            "artifacts/generated/execution-evidence.json",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode != 0
+    assert "cannot be combined" in proc.stderr
+
+
+def test_run_loop_core_cycle_ingests_repo_state_and_generates_control_plane_candidate(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+
+    for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
+        copy_script(repo_root, script_name)
+
+    bootstrap_repo(repo_root)
+
+    run_state = json.loads((repo_root / ".hermes-flow" / "run-state.json").read_text(encoding="utf-8"))
+    run_state["workflow_stage"] = "execute"
+    run_state["status"] = "blocked"
+    run_state["active_phase_id"] = "phase-loop-core"
+    run_state["active_task_id"] = "task-review"
+    run_state["updated_at"] = "2026-04-17T07:30:00Z"
+    (repo_root / ".hermes-flow" / "run-state.json").write_text(json.dumps(run_state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    verification_state = json.loads((repo_root / ".hermes-flow" / "verification-state.json").read_text(encoding="utf-8"))
+    verification_state["task_review_state"] = {
+        "task-review": {
+            "round_count": 4,
+            "latest_blocking_bugs": ["promotion_boundary_unclear"],
+            "latest_clear": False,
+            "review_evidence": ["blocking bug remained after review"],
+            "updated_at": "2026-04-17T07:30:00Z",
+        }
+    }
+    verification_state["phase_review_state"] = {
+        "phase-loop-core": {
+            "round_count": 2,
+            "latest_blocking_bugs": [],
+            "latest_clear": True,
+            "review_evidence": ["phase review partially clear"],
+            "updated_at": "2026-04-17T07:30:00Z",
+        }
+    }
+    verification_state["task_checks"] = [{"target": "task-review", "result": "pass"}]
+    (repo_root / ".hermes-flow" / "verification-state.json").write_text(json.dumps(verification_state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--ingest-repo-state",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    report = json.loads((repo_root / Path(proc.stdout.strip())).read_text(encoding="utf-8"))
+    assert report["candidate"]["classification"] == "control_plane_policy"
+    assert report["promotion"]["decision"] == "milestone_promotion_required"
+    assert report["observation"]["evidence"]["run_state"]["status"] == "blocked"
+    assert report["observation"]["evidence"]["task_review_summary"]["blocking_bug_count"] == 1
+
+
+def test_run_loop_core_cycle_ingests_repo_state_with_ambiguous_acceptance_state_stays_control_plane(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+
+    for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
+        copy_script(repo_root, script_name)
+
+    bootstrap_repo(repo_root)
+
+    run_state = json.loads((repo_root / ".hermes-flow" / "run-state.json").read_text(encoding="utf-8"))
+    run_state["workflow_stage"] = "final-acceptance"
+    run_state["status"] = "running"
+    (repo_root / ".hermes-flow" / "run-state.json").write_text(json.dumps(run_state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    verification_state = json.loads((repo_root / ".hermes-flow" / "verification-state.json").read_text(encoding="utf-8"))
+    verification_state["task_review_state"] = {
+        "task-final": {
+            "round_count": 3,
+            "latest_blocking_bugs": [],
+            "latest_clear": True,
+            "review_evidence": ["clear"],
+            "updated_at": "2026-04-17T07:35:00Z",
+        }
+    }
+    verification_state["phase_review_state"] = {
+        "phase-final": {
+            "round_count": 5,
+            "latest_blocking_bugs": [],
+            "latest_clear": True,
+            "review_evidence": ["clear"],
+            "updated_at": "2026-04-17T07:35:00Z",
+        }
+    }
+    verification_state["final_acceptance"] = [{"target": "surface", "result": "pending"}]
+    (repo_root / ".hermes-flow" / "verification-state.json").write_text(json.dumps(verification_state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--ingest-repo-state",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    report = json.loads((repo_root / Path(proc.stdout.strip())).read_text(encoding="utf-8"))
+    assert report["candidate"]["classification"] == "control_plane_policy"
+    assert report["promotion"]["decision"] == "milestone_promotion_required"
+
+
+def test_run_loop_core_cycle_ingests_repo_state_without_acceptance_evidence_stays_control_plane(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+
+    for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
+        copy_script(repo_root, script_name)
+
+    bootstrap_repo(repo_root)
+
+    run_state = json.loads((repo_root / ".hermes-flow" / "run-state.json").read_text(encoding="utf-8"))
+    run_state["workflow_stage"] = "final-acceptance"
+    run_state["status"] = "running"
+    (repo_root / ".hermes-flow" / "run-state.json").write_text(json.dumps(run_state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    verification_state = json.loads((repo_root / ".hermes-flow" / "verification-state.json").read_text(encoding="utf-8"))
+    verification_state["task_review_state"] = {
+        "task-final": {
+            "round_count": 3,
+            "latest_blocking_bugs": [],
+            "latest_clear": True,
+            "review_evidence": ["clear"],
+            "updated_at": "2026-04-17T07:35:00Z",
+        }
+    }
+    verification_state["phase_review_state"] = {
+        "phase-final": {
+            "round_count": 5,
+            "latest_blocking_bugs": [],
+            "latest_clear": True,
+            "review_evidence": ["clear"],
+            "updated_at": "2026-04-17T07:35:00Z",
+        }
+    }
+    verification_state["final_acceptance"] = []
+    (repo_root / ".hermes-flow" / "verification-state.json").write_text(json.dumps(verification_state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--ingest-repo-state",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    report = json.loads((repo_root / Path(proc.stdout.strip())).read_text(encoding="utf-8"))
+    assert report["candidate"]["classification"] == "control_plane_policy"
+    assert report["promotion"]["decision"] == "milestone_promotion_required"
+
+
+def test_run_loop_core_cycle_ingests_repo_state_without_clear_reviews_stays_control_plane(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+
+    for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
+        copy_script(repo_root, script_name)
+
+    bootstrap_repo(repo_root)
+
+    run_state = json.loads((repo_root / ".hermes-flow" / "run-state.json").read_text(encoding="utf-8"))
+    run_state["workflow_stage"] = "final-acceptance"
+    run_state["status"] = "running"
+    (repo_root / ".hermes-flow" / "run-state.json").write_text(json.dumps(run_state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    verification_state = json.loads((repo_root / ".hermes-flow" / "verification-state.json").read_text(encoding="utf-8"))
+    verification_state["task_review_state"] = {
+        "task-final": {
+            "round_count": 3,
+            "latest_blocking_bugs": [],
+            "latest_clear": False,
+            "review_evidence": ["not clear yet"],
+            "updated_at": "2026-04-17T07:35:00Z",
+        }
+    }
+    verification_state["phase_review_state"] = {
+        "phase-final": {
+            "round_count": 5,
+            "latest_blocking_bugs": [],
+            "latest_clear": True,
+            "review_evidence": ["clear"],
+            "updated_at": "2026-04-17T07:35:00Z",
+        }
+    }
+    verification_state["final_acceptance"] = [{"target": "surface", "result": "fail"}]
+    (repo_root / ".hermes-flow" / "verification-state.json").write_text(json.dumps(verification_state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--ingest-repo-state",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    report = json.loads((repo_root / Path(proc.stdout.strip())).read_text(encoding="utf-8"))
+    assert report["candidate"]["classification"] == "control_plane_policy"
+    assert report["promotion"]["decision"] == "milestone_promotion_required"
+
+
+def test_run_loop_core_cycle_ingests_repo_state_and_auto_promotes_internal_rule_when_clear(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+
+    for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
+        copy_script(repo_root, script_name)
+
+    bootstrap_repo(repo_root)
+
+    run_state = json.loads((repo_root / ".hermes-flow" / "run-state.json").read_text(encoding="utf-8"))
+    run_state["workflow_stage"] = "final-acceptance"
+    run_state["status"] = "running"
+    run_state["updated_at"] = "2026-04-17T07:35:00Z"
+    (repo_root / ".hermes-flow" / "run-state.json").write_text(json.dumps(run_state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    verification_state = json.loads((repo_root / ".hermes-flow" / "verification-state.json").read_text(encoding="utf-8"))
+    verification_state["task_review_state"] = {
+        "task-final": {
+            "round_count": 3,
+            "latest_blocking_bugs": [],
+            "latest_clear": True,
+            "review_evidence": ["clear"],
+            "updated_at": "2026-04-17T07:35:00Z",
+        }
+    }
+    verification_state["phase_review_state"] = {
+        "phase-final": {
+            "round_count": 5,
+            "latest_blocking_bugs": [],
+            "latest_clear": True,
+            "review_evidence": ["clear"],
+            "updated_at": "2026-04-17T07:35:00Z",
+        }
+    }
+    verification_state["task_checks"] = [{"target": "task-final", "result": "pass"}]
+    verification_state["phase_checks"] = [{"target": "phase-final", "result": "pass"}]
+    verification_state["final_acceptance"] = [{"target": "surface", "result": "fail"}]
+    (repo_root / ".hermes-flow" / "verification-state.json").write_text(json.dumps(verification_state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--ingest-repo-state",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    report = json.loads((repo_root / Path(proc.stdout.strip())).read_text(encoding="utf-8"))
+    assert report["candidate"]["classification"] == "internal_operating_rule"
+    assert report["promotion"]["decision"] == "internal_promotion"
+
+    loop_state = json.loads((repo_root / ".hermes-flow" / "loop-core-state.json").read_text(encoding="utf-8"))
+    assert loop_state["operator_state"]["state_id"].startswith("candidate-")
+    assert loop_state["candidate_state"] is None

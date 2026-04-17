@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import json
 from collections import OrderedDict
 from datetime import datetime, timezone
@@ -106,6 +107,18 @@ def main() -> int:
                     "mode": "governance-hardening",
                     "controller": "omh",
                     "last_transition": None,
+                    "updated_at": None,
+                }
+            ),
+            "verification-state.json": OrderedDict(
+                {
+                    "task_checks": [],
+                    "phase_checks": [],
+                    "integration_checks": [],
+                    "artifact_checks": [],
+                    "final_acceptance": [],
+                    "task_review_state": {},
+                    "phase_review_state": {},
                     "updated_at": None,
                 }
             ),
