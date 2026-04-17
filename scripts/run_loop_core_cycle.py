@@ -230,7 +230,7 @@ def ingest_execution_evidence(repo_root: Path, evidence_path: str, report_path: 
     return ingested, final_report_path
 
 
-def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, str, str, str, list[str], bool]:
+def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, str, str, str, list[str], bool, dict[str, Any] | None]:
     run_state = normalize_run_state(load_json(repo_root / RUN_STATE_PATH))
     verification_state = load_json(repo_root / VERIFICATION_STATE_PATH)
 
@@ -298,14 +298,31 @@ def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, 
         candidate_summary = "record stable repo-state signal without changing contract semantics"
         classification = "control_plane_policy"
 
+    milestone_stop_artifact = None
     if classification == "control_plane_policy" and should_stop_at_milestone:
         candidate_summary = f"{candidate_summary} and stop at milestone boundary"
+        milestone_stop_artifact = OrderedDict(
+            {
+                "artifact_type": "milestone_stop_request",
+                "reason": "self_evolve_policy_disabled_auto_apply",
+                "why_stopped": "Self-evolve policy requires this control-plane candidate to stop at the milestone boundary instead of auto-applying.",
+                "continue_when": [
+                    "operator explicitly applies the queued milestone candidate",
+                    "self_evolve.auto_apply_control_plane becomes true for a future cycle",
+                ],
+                "blocked_by": [
+                    "run-state self_evolve policy does not currently allow autonomous control-plane apply"
+                ],
+                "policy_snapshot": run_state.get("self_evolve"),
+                "generated_at": utc_now(),
+            }
+        )
 
     target_surface = list(DEFAULT_TARGET_SURFACES[classification])
-    return evidence, observation, candidate_summary, classification, target_surface, should_stop_at_milestone
+    return evidence, observation, candidate_summary, classification, target_surface, should_stop_at_milestone, milestone_stop_artifact
 
 
-def queue_milestone_candidate(repo_root: Path, cycle_id: str, candidate_record: dict[str, Any], promotion_record: dict[str, Any]) -> OrderedDict:
+def queue_milestone_candidate(repo_root: Path, cycle_id: str, candidate_record: dict[str, Any], promotion_record: dict[str, Any], milestone_stop_artifact: dict[str, Any] | None = None) -> OrderedDict:
     queue_path = repo_root / MILESTONE_QUEUE_PATH
     queue = load_json(queue_path)
     entry = OrderedDict(
@@ -321,6 +338,8 @@ def queue_milestone_candidate(repo_root: Path, cycle_id: str, candidate_record: 
             "queued_at": utc_now(),
         }
     )
+    if milestone_stop_artifact is not None:
+        entry["milestone_stop_artifact"] = milestone_stop_artifact
     queue.setdefault("pending", []).append(entry)
     queue["updated_at"] = utc_now()
     dump_json(queue_path, queue)
@@ -404,6 +423,7 @@ def run_cycle(
     evidence: dict[str, Any] | None = None,
     target_surface: list[str] | None = None,
     auto_apply_queued_milestone: bool = False,
+    milestone_stop_artifact: dict[str, Any] | None = None,
 ) -> Path:
     loop_state_path = repo_root / LOOP_CORE_STATE_PATH
     report_output_path = (repo_root / report_path).resolve()
@@ -480,7 +500,13 @@ def run_cycle(
     dump_json(loop_state_path, loop_state)
 
     if decision == "milestone_promotion_required":
-        milestone_queue_entry = queue_milestone_candidate(repo_root, cycle_id, candidate_record, promotion_record)
+        milestone_queue_entry = queue_milestone_candidate(
+            repo_root,
+            cycle_id,
+            candidate_record,
+            promotion_record,
+            milestone_stop_artifact=milestone_stop_artifact,
+        )
         if auto_apply_queued_milestone:
             auto_applied_milestone_entry = apply_milestone_promotion(repo_root, milestone_queue_entry["queue_id"])
 
@@ -495,6 +521,7 @@ def run_cycle(
             "operator_state": current_loop_state.get("operator_state"),
             "candidate_state": current_loop_state.get("candidate_state"),
             "milestone_queue_entry": milestone_queue_entry,
+            "milestone_stop_artifact": milestone_stop_artifact,
             "auto_applied_milestone_entry": auto_applied_milestone_entry,
             "generated_at": timestamp,
         }
@@ -566,10 +593,11 @@ def main() -> int:
     target_surface = None
     repo_run_state = None
     repo_state_requested_stop = False
+    milestone_stop_artifact = None
 
     if args.ingest_repo_state:
         repo_run_state = normalize_run_state(load_json(repo_root / RUN_STATE_PATH))
-        evidence, observation, candidate_summary, classification, target_surface, repo_state_requested_stop = build_loop_candidate_from_repo_state(repo_root)
+        evidence, observation, candidate_summary, classification, target_surface, repo_state_requested_stop, milestone_stop_artifact = build_loop_candidate_from_repo_state(repo_root)
 
     auto_apply_queued_milestone = should_auto_apply_milestone(
         args.mode,
@@ -603,6 +631,7 @@ def main() -> int:
         evidence=evidence,
         target_surface=target_surface,
         auto_apply_queued_milestone=auto_apply_queued_milestone,
+        milestone_stop_artifact=milestone_stop_artifact,
     )
     print(str(report_path))
     return 0

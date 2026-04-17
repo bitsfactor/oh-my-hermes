@@ -827,10 +827,14 @@ def test_run_loop_core_cycle_ingests_repo_state_and_stops_at_milestone_boundary_
     assert report["promotion"]["decision"] == "milestone_promotion_required"
     assert report["auto_applied_milestone_entry"] is None
     assert report["candidate"]["summary"].endswith("stop at milestone boundary")
+    assert report["milestone_stop_artifact"]["artifact_type"] == "milestone_stop_request"
+    assert report["milestone_stop_artifact"]["reason"] == "self_evolve_policy_disabled_auto_apply"
+    assert "operator explicitly applies the queued milestone candidate" in report["milestone_stop_artifact"]["continue_when"]
 
     queue = json.loads((repo_root / ".hermes-flow" / "milestone-queue.json").read_text(encoding="utf-8"))
     assert len(queue["pending"]) == 1
     assert queue["applied"] == []
+    assert queue["pending"][0]["milestone_stop_artifact"]["reason"] == "self_evolve_policy_disabled_auto_apply"
 
 
 def test_run_loop_core_cycle_ingests_repo_state_and_generates_control_plane_candidate(tmp_path: Path) -> None:
