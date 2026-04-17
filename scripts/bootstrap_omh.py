@@ -105,6 +105,14 @@ def main() -> int:
                     "active_task_id": None,
                     "mode": "governance-hardening",
                     "controller": "omh",
+                    "self_evolve": OrderedDict(
+                        {
+                            "enabled": True,
+                            "autonomous_modes": ["governance-hardening", "self-evolve"],
+                            "auto_apply_control_plane": True,
+                            "updated_at": None,
+                        }
+                    ),
                     "last_transition": None,
                     "updated_at": None,
                 }

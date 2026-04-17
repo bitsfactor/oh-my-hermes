@@ -43,6 +43,7 @@ DEFAULT_TARGET_SURFACES = {
     "control_plane_policy": [".hermes-flow/verification-state.json", ".hermes-flow/milestone-queue.json", "docs/plans/"],
     "product_contract_rule": ["docs/plans/", "README.md"],
 }
+AUTONOMOUS_SELF_EVOLVE_MODES = {"governance-hardening", "self-evolve"}
 
 
 def utc_now() -> str:
@@ -112,7 +113,7 @@ def normalize_loop_state(loop_state: dict[str, Any]) -> dict[str, Any]:
     return loop_state
 
 
-def classify_promotion(classification: str, requested_decision: str | None) -> tuple[str, str]:
+def classify_promotion(classification: str, requested_decision: str | None, allow_autonomous_milestone_apply: bool = False) -> tuple[str, str]:
     if classification not in ALLOWED_CLASSIFICATIONS:
         raise ValueError(f"Unsupported classification: {classification}")
     minimum_decision = CLASSIFICATION_MINIMUM_DECISION[classification]
@@ -128,13 +129,15 @@ def classify_promotion(classification: str, requested_decision: str | None) -> t
     if classification == "product_contract_rule":
         return "user_decision_required", "Contract-level candidates must not silently promote."
     if classification == "control_plane_policy":
+        if allow_autonomous_milestone_apply:
+            return "milestone_promotion_required", "Control-plane policy changes require milestone review and may auto-apply in autonomous self-evolve modes."
         return "milestone_promotion_required", "Control-plane policy changes require milestone review."
     return "internal_promotion", "Internal operating rule is eligible for autonomous internal promotion."
 
 
-def validate_cycle_request(repo_root: Path, classification: str, requested_decision: str | None, report_path: str, evidence_path: str | None = None, evidence_report_path: str | None = None) -> None:
+def validate_cycle_request(repo_root: Path, classification: str, requested_decision: str | None, report_path: str, evidence_path: str | None = None, evidence_report_path: str | None = None, allow_autonomous_milestone_apply: bool = False) -> None:
     repo_root_resolved = repo_root.resolve()
-    classify_promotion(classification, requested_decision)
+    classify_promotion(classification, requested_decision, allow_autonomous_milestone_apply=allow_autonomous_milestone_apply)
     candidate_paths = [(repo_root / report_path).resolve()]
     if evidence_path is not None:
         candidate_paths.append((repo_root / evidence_path).resolve())
@@ -375,6 +378,7 @@ def run_cycle(
     requested_decision: str | None = None,
     evidence: dict[str, Any] | None = None,
     target_surface: list[str] | None = None,
+    auto_apply_queued_milestone: bool = False,
 ) -> Path:
     loop_state_path = repo_root / LOOP_CORE_STATE_PATH
     report_output_path = (repo_root / report_path).resolve()
@@ -399,7 +403,11 @@ def run_cycle(
         target_surface=target_surface or list(DEFAULT_TARGET_SURFACES[classification]),
         evidence=evidence,
     )
-    decision, reason = classify_promotion(classification, requested_decision)
+    decision, reason = classify_promotion(
+        classification,
+        requested_decision,
+        allow_autonomous_milestone_apply=auto_apply_queued_milestone,
+    )
     promotion_record = OrderedDict(
         {
             "cycle_id": cycle_id,
@@ -428,6 +436,7 @@ def run_cycle(
     loop_state["updated_at"] = timestamp
 
     milestone_queue_entry = None
+    auto_applied_milestone_entry = None
     if decision == "internal_promotion":
         prior_operator = dict(loop_state.get("operator_state", {}))
         if prior_operator:
@@ -447,7 +456,10 @@ def run_cycle(
 
     if decision == "milestone_promotion_required":
         milestone_queue_entry = queue_milestone_candidate(repo_root, cycle_id, candidate_record, promotion_record)
+        if auto_apply_queued_milestone:
+            auto_applied_milestone_entry = apply_milestone_promotion(repo_root, milestone_queue_entry["queue_id"])
 
+    current_loop_state = normalize_loop_state(load_json(loop_state_path))
     report = OrderedDict(
         {
             "cycle_id": cycle_id,
@@ -455,9 +467,10 @@ def run_cycle(
             "observation": observation_record,
             "candidate": candidate_record,
             "promotion": promotion_record,
-            "operator_state": normalize_loop_state(load_json(loop_state_path)).get("operator_state"),
-            "candidate_state": normalize_loop_state(load_json(loop_state_path)).get("candidate_state"),
+            "operator_state": current_loop_state.get("operator_state"),
+            "candidate_state": current_loop_state.get("candidate_state"),
             "milestone_queue_entry": milestone_queue_entry,
+            "auto_applied_milestone_entry": auto_applied_milestone_entry,
             "generated_at": timestamp,
         }
     )
@@ -465,6 +478,14 @@ def run_cycle(
     dump_json(final_report_path, report)
     append_artifact(repo_root, "loop_cycle_report", str(final_report_path), "omh-loop-core-runner-v1")
     return final_report_path
+
+
+def should_auto_apply_milestone(mode: str, classification: str, requested_decision: str | None) -> bool:
+    return (
+        mode in AUTONOMOUS_SELF_EVOLVE_MODES
+        and classification == "control_plane_policy"
+        and requested_decision is None
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -517,6 +538,8 @@ def main() -> int:
     if args.ingest_repo_state:
         evidence, observation, candidate_summary, classification, target_surface = build_loop_candidate_from_repo_state(repo_root)
 
+    auto_apply_queued_milestone = should_auto_apply_milestone(args.mode, classification, args.promotion_decision)
+
     validate_cycle_request(
         repo_root,
         classification=classification,
@@ -524,6 +547,7 @@ def main() -> int:
         report_path=args.report_path,
         evidence_path=args.evidence_path,
         evidence_report_path=args.evidence_report_path if args.evidence_path else None,
+        allow_autonomous_milestone_apply=auto_apply_queued_milestone,
     )
 
     if args.evidence_path:
@@ -539,6 +563,7 @@ def main() -> int:
         requested_decision=args.promotion_decision,
         evidence=evidence,
         target_surface=target_surface,
+        auto_apply_queued_milestone=auto_apply_queued_milestone,
     )
     print(str(report_path))
     return 0
