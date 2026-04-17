@@ -37,7 +37,7 @@ def test_bootstrap_omh_creates_loop_core_state(tmp_path: Path) -> None:
         check=True,
     )
 
-    assert "validated_json_count=4" in proc.stdout
+    assert "validated_json_count=5" in proc.stdout
     loop_state = json.loads((repo_root / ".hermes-flow" / "loop-core-state.json").read_text(encoding="utf-8"))
     assert loop_state["core_name"] == "回环核心"
     assert loop_state["current_mode"] == "governance-hardening"
@@ -47,6 +47,10 @@ def test_bootstrap_omh_creates_loop_core_state(tmp_path: Path) -> None:
     verification_state = json.loads((repo_root / ".hermes-flow" / "verification-state.json").read_text(encoding="utf-8"))
     assert verification_state["task_review_state"] == {}
     assert verification_state["phase_review_state"] == {}
+
+    milestone_queue = json.loads((repo_root / ".hermes-flow" / "milestone-queue.json").read_text(encoding="utf-8"))
+    assert milestone_queue["pending"] == []
+    assert milestone_queue["applied"] == []
 
 
 def test_run_loop_core_cycle_internal_promotion_updates_operator_state(tmp_path: Path) -> None:
@@ -90,13 +94,14 @@ def test_run_loop_core_cycle_internal_promotion_updates_operator_state(tmp_path:
     report = json.loads((repo_root / report_path).read_text(encoding="utf-8"))
     assert report["cycle_id"] == "loop-cycle-001"
     assert report["candidate"]["status"] == "auto_applied"
+    assert report["candidate"]["target_surface"]
 
     artifacts = json.loads((repo_root / ".hermes-flow" / "artifacts-index.json").read_text(encoding="utf-8"))
     assert artifacts["artifacts"]
     assert artifacts["artifacts"][0]["class"] == "loop_cycle_report"
 
 
-def test_run_loop_core_cycle_control_plane_policy_requires_milestone_review(tmp_path: Path) -> None:
+def test_run_loop_core_cycle_control_plane_policy_requires_milestone_review_and_queues_candidate(tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     (repo_root / ".git").mkdir()
@@ -125,9 +130,215 @@ def test_run_loop_core_cycle_control_plane_policy_requires_milestone_review(tmp_
 
     report = json.loads((repo_root / Path(proc.stdout.strip())).read_text(encoding="utf-8"))
     assert report["promotion"]["decision"] == "milestone_promotion_required"
+    assert report["milestone_queue_entry"]["status"] == "pending"
+    assert ".hermes-flow/milestone-queue.json" in report["milestone_queue_entry"]["target_surface"]
+
+    queue = json.loads((repo_root / ".hermes-flow" / "milestone-queue.json").read_text(encoding="utf-8"))
+    assert len(queue["pending"]) == 1
+    assert queue["pending"][0]["candidate_id"] == report["candidate"]["candidate_id"]
+
+
+def test_apply_milestone_queue_entry_promotes_candidate_to_operator_state(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+
+    for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
+        copy_script(repo_root, script_name)
+
+    bootstrap_repo(repo_root)
+
+    cycle_proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--observation",
+            "control-plane thresholds changed under review pressure",
+            "--candidate-summary",
+            "tighten promotion thresholds for control-plane rules",
+            "--classification",
+            "control_plane_policy",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    cycle_report = json.loads((repo_root / Path(cycle_proc.stdout.strip())).read_text(encoding="utf-8"))
+    queue_id = cycle_report["milestone_queue_entry"]["queue_id"]
+
+    apply_proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--apply-milestone-queue-id",
+            queue_id,
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    applied = json.loads(apply_proc.stdout)
+    assert applied["queue_id"] == queue_id
+    assert applied["status"] == "applied"
+
+    queue = json.loads((repo_root / ".hermes-flow" / "milestone-queue.json").read_text(encoding="utf-8"))
+    assert queue["pending"] == []
+    assert len(queue["applied"]) == 1
+
     loop_state = json.loads((repo_root / ".hermes-flow" / "loop-core-state.json").read_text(encoding="utf-8"))
-    assert loop_state["candidate_state"]["classification"] == "control_plane_policy"
-    assert loop_state["operator_state"]["state_id"] == "accepted-baseline"
+    assert loop_state["operator_state"]["state_id"] == cycle_report["candidate"]["candidate_id"]
+    assert loop_state["candidate_state"] is None
+
+
+def test_candidate_ids_are_cycle_stable_and_unique_across_milestone_runs(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+
+    for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
+        copy_script(repo_root, script_name)
+
+    bootstrap_repo(repo_root)
+
+    first_proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--observation",
+            "first control-plane refinement",
+            "--candidate-summary",
+            "first milestone candidate",
+            "--classification",
+            "control_plane_policy",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    second_proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--observation",
+            "second control-plane refinement",
+            "--candidate-summary",
+            "second milestone candidate",
+            "--classification",
+            "control_plane_policy",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    first_report_path = Path(first_proc.stdout.strip())
+    second_report_path = Path(second_proc.stdout.strip())
+    first_report = json.loads((repo_root / ".hermes-flow" / "loop-core-state.json").read_text(encoding="utf-8"))["candidates"][0]
+    second_report = json.loads((repo_root / ".hermes-flow" / "loop-core-state.json").read_text(encoding="utf-8"))["candidates"][1]
+
+    assert first_report["candidate_id"] == "candidate-loop-cycle-001"
+    assert second_report["candidate_id"] == "candidate-loop-cycle-002"
+    assert first_report["candidate_id"] != second_report["candidate_id"]
+    assert first_report_path.name == "latest-loop-cycle.json"
+    assert second_report_path.name == "latest-loop-cycle.json"
+
+
+def test_apply_milestone_queue_entry_preserves_newer_candidate_state(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+
+    for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
+        copy_script(repo_root, script_name)
+
+    bootstrap_repo(repo_root)
+
+    first_proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--observation",
+            "first milestone candidate",
+            "--candidate-summary",
+            "first control-plane refinement",
+            "--classification",
+            "control_plane_policy",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    first_report = json.loads((repo_root / Path(first_proc.stdout.strip())).read_text(encoding="utf-8"))
+    first_queue_id = first_report["milestone_queue_entry"]["queue_id"]
+
+    second_proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--observation",
+            "second milestone candidate",
+            "--candidate-summary",
+            "second control-plane refinement",
+            "--classification",
+            "control_plane_policy",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    second_report = json.loads((repo_root / Path(second_proc.stdout.strip())).read_text(encoding="utf-8"))
+
+    subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--apply-milestone-queue-id",
+            first_queue_id,
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    loop_state = json.loads((repo_root / ".hermes-flow" / "loop-core-state.json").read_text(encoding="utf-8"))
+    assert loop_state["operator_state"]["state_id"] == first_report["candidate"]["candidate_id"]
+    assert loop_state["candidate_state"]["candidate_id"] == second_report["candidate"]["candidate_id"]
+
+
+def test_apply_milestone_queue_entry_rejects_mixed_flags(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+
+    for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
+        copy_script(repo_root, script_name)
+
+    bootstrap_repo(repo_root)
+
+    proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--apply-milestone-queue-id",
+            "milestone-loop-cycle-001",
+            "--observation",
+            "should fail",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode != 0
+    assert "cannot be combined" in proc.stderr
 
 
 def test_run_loop_core_cycle_rejects_downgraded_explicit_promotion_for_control_plane_policy(tmp_path: Path) -> None:
@@ -559,6 +770,7 @@ def test_run_loop_core_cycle_ingests_repo_state_and_generates_control_plane_cand
     assert report["promotion"]["decision"] == "milestone_promotion_required"
     assert report["observation"]["evidence"]["run_state"]["status"] == "blocked"
     assert report["observation"]["evidence"]["task_review_summary"]["blocking_bug_count"] == 1
+    assert report["milestone_queue_entry"]["status"] == "pending"
 
 
 def test_run_loop_core_cycle_ingests_repo_state_with_ambiguous_acceptance_state_stays_control_plane(tmp_path: Path) -> None:

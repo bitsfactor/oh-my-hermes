@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import argparse
 import json
 from collections import OrderedDict
 from datetime import datetime, timezone
@@ -125,6 +124,13 @@ def main() -> int:
             "artifacts-index.json": OrderedDict(
                 {
                     "artifacts": [],
+                    "updated_at": None,
+                }
+            ),
+            "milestone-queue.json": OrderedDict(
+                {
+                    "pending": [],
+                    "applied": [],
                     "updated_at": None,
                 }
             ),

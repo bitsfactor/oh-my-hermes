@@ -23,13 +23,15 @@ See `docs/plans/` for the current product design stack.
 The repo now contains the first concrete executable slice of the 回环核心:
 - `scripts/bootstrap_omh.py` initializes omh's own loop-core control surface
 - `scripts/run_loop_core_cycle.py` runs one governed recursive loop cycle
-- `tests/test_loop_core.py` verifies bootstrap, promotion behavior, evidence-ingest behavior, and repo-state ingestion end to end
+- `tests/test_loop_core.py` verifies bootstrap, promotion behavior, evidence-ingest behavior, repo-state ingestion, and milestone-queue behavior end to end
 
 Current executable abilities:
 - explicit accepted operator state vs candidate state
 - promotion ladder with internal promotion / milestone review / user-decision boundaries
 - evidence auto-ingest from execution-result JSON into the loop cycle
-- repo-state ingest from `.hermes-flow/run-state.json` and `.hermes-flow/verification-state.json` into recursive candidate generation
+- repo-state ingest from `.hermes-flow/run-state.json` and `.hermes-flow/verification-state.json`
+- milestone queue for `milestone_promotion_required` candidates plus an apply step for governed milestone promotion
+- target-surface mapping for candidate impact surfaces
 
 This is still not the full product.
-It is now a repo-owned executable proof that omh can begin to derive its own recursive improvements from real workflow-state evidence, not only hand-authored observations.
+It is now a repo-owned executable proof that omh can derive recursive improvements from real workflow-state evidence and route milestone-bound changes into an explicit governance queue instead of only narrating them.

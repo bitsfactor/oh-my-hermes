@@ -13,6 +13,7 @@ LOOP_CORE_STATE_PATH = ".hermes-flow/loop-core-state.json"
 ARTIFACTS_INDEX_PATH = ".hermes-flow/artifacts-index.json"
 VERIFICATION_STATE_PATH = ".hermes-flow/verification-state.json"
 RUN_STATE_PATH = ".hermes-flow/run-state.json"
+MILESTONE_QUEUE_PATH = ".hermes-flow/milestone-queue.json"
 DEFAULT_REPORT_PATH = "artifacts/reports/latest-loop-cycle.json"
 DEFAULT_EVIDENCE_REPORT_PATH = "artifacts/reports/latest-execution-evidence.json"
 PROMOTION_LADDER = {
@@ -36,6 +37,11 @@ CLASSIFICATION_MINIMUM_DECISION = {
     "internal_operating_rule": "internal_promotion",
     "control_plane_policy": "milestone_promotion_required",
     "product_contract_rule": "user_decision_required",
+}
+DEFAULT_TARGET_SURFACES = {
+    "internal_operating_rule": ["scripts/run_loop_core_cycle.py", "scripts/bootstrap_omh.py"],
+    "control_plane_policy": [".hermes-flow/verification-state.json", ".hermes-flow/milestone-queue.json", "docs/plans/"],
+    "product_contract_rule": ["docs/plans/", "README.md"],
 }
 
 
@@ -139,13 +145,13 @@ def validate_cycle_request(repo_root: Path, classification: str, requested_decis
             raise ValueError(f"Path escapes repo root: {candidate_path}")
 
 
-def build_candidate(summary: str, classification: str, target_file: str = "", auto_apply: bool = False, evidence: dict[str, Any] | None = None) -> OrderedDict:
+def build_candidate(cycle_id: str, summary: str, classification: str, target_surface: list[str], auto_apply: bool = False, evidence: dict[str, Any] | None = None) -> OrderedDict:
     candidate = OrderedDict(
         {
-            "candidate_id": f"candidate-{utc_now().replace(':', '').replace('-', '')}",
+            "candidate_id": f"candidate-{cycle_id}",
             "summary": summary,
             "classification": classification,
-            "target_file": target_file,
+            "target_surface": target_surface,
             "auto_apply": auto_apply,
             "status": "candidate_detected",
             "created_at": utc_now(),
@@ -205,7 +211,7 @@ def ingest_execution_evidence(repo_root: Path, evidence_path: str, report_path: 
     return ingested, final_report_path
 
 
-def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, str, str, str]:
+def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, str, str, str, list[str]]:
     run_state = load_json(repo_root / RUN_STATE_PATH)
     verification_state = load_json(repo_root / VERIFICATION_STATE_PATH)
 
@@ -267,7 +273,96 @@ def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, 
         candidate_summary = "record stable repo-state signal without changing contract semantics"
         classification = "control_plane_policy"
 
-    return evidence, observation, candidate_summary, classification
+    target_surface = list(DEFAULT_TARGET_SURFACES[classification])
+    return evidence, observation, candidate_summary, classification, target_surface
+
+
+def queue_milestone_candidate(repo_root: Path, cycle_id: str, candidate_record: dict[str, Any], promotion_record: dict[str, Any]) -> OrderedDict:
+    queue_path = repo_root / MILESTONE_QUEUE_PATH
+    queue = load_json(queue_path)
+    entry = OrderedDict(
+        {
+            "queue_id": f"milestone-{cycle_id}",
+            "cycle_id": cycle_id,
+            "candidate_id": candidate_record["candidate_id"],
+            "summary": candidate_record["summary"],
+            "classification": candidate_record["classification"],
+            "target_surface": candidate_record.get("target_surface", []),
+            "promotion_decision": promotion_record["decision"],
+            "status": "pending",
+            "queued_at": utc_now(),
+        }
+    )
+    queue.setdefault("pending", []).append(entry)
+    queue["updated_at"] = utc_now()
+    dump_json(queue_path, queue)
+    append_artifact(repo_root, "milestone_queue_entry", str(queue_path), "omh-loop-core-runner-v1")
+    return entry
+
+
+def recalculate_candidate_state(loop_state: dict[str, Any], queue: dict[str, Any]) -> dict[str, Any] | None:
+    pending = queue.get("pending", [])
+    if not pending:
+        return None
+    latest = pending[-1]
+    return OrderedDict(
+        {
+            "candidate_id": latest["candidate_id"],
+            "status": "candidate_detected",
+            "summary": latest["summary"],
+            "classification": latest["classification"],
+            "target_surface": latest.get("target_surface", []),
+            "updated_at": loop_state.get("updated_at"),
+        }
+    )
+
+
+def apply_milestone_promotion(repo_root: Path, queue_id: str) -> OrderedDict:
+    queue_path = repo_root / MILESTONE_QUEUE_PATH
+    loop_state_path = repo_root / LOOP_CORE_STATE_PATH
+    queue = load_json(queue_path)
+    loop_state = normalize_loop_state(load_json(loop_state_path))
+
+    pending = queue.get("pending", [])
+    entry = next((item for item in pending if item.get("queue_id") == queue_id), None)
+    if entry is None:
+        raise ValueError(f"Unknown milestone queue entry: {queue_id}")
+
+    pending[:] = [item for item in pending if item.get("queue_id") != queue_id]
+    applied_entry = OrderedDict(entry)
+    applied_entry["status"] = "applied"
+    applied_entry["applied_at"] = utc_now()
+    queue.setdefault("applied", []).append(applied_entry)
+    queue["updated_at"] = utc_now()
+    dump_json(queue_path, queue)
+
+    prior_operator = dict(loop_state.get("operator_state", {}))
+    if prior_operator:
+        loop_state.setdefault("accepted_state_history", []).append(prior_operator)
+    loop_state["operator_state"] = OrderedDict(
+        {
+            "state_id": applied_entry["candidate_id"],
+            "status": "accepted",
+            "summary": applied_entry["summary"],
+            "updated_at": applied_entry["applied_at"],
+        }
+    )
+    if loop_state.get("candidate_state", {}).get("candidate_id") == applied_entry["candidate_id"]:
+        loop_state["candidate_state"] = None
+    loop_state["candidate_state"] = recalculate_candidate_state(loop_state, queue)
+
+    for candidate in loop_state.get("candidates", []):
+        if candidate.get("candidate_id") == applied_entry["candidate_id"]:
+            candidate["status"] = "milestone_applied"
+            break
+    for promotion in loop_state.get("promotions", []):
+        if promotion.get("candidate_id") == applied_entry["candidate_id"]:
+            promotion["applied_at"] = applied_entry["applied_at"]
+            break
+    loop_state["updated_at"] = utc_now()
+    dump_json(loop_state_path, loop_state)
+    append_artifact(repo_root, "milestone_promotion_applied", str(queue_path), "omh-loop-core-runner-v1")
+    return applied_entry
 
 
 def run_cycle(
@@ -279,6 +374,7 @@ def run_cycle(
     report_path: str,
     requested_decision: str | None = None,
     evidence: dict[str, Any] | None = None,
+    target_surface: list[str] | None = None,
 ) -> Path:
     loop_state_path = repo_root / LOOP_CORE_STATE_PATH
     report_output_path = (repo_root / report_path).resolve()
@@ -296,7 +392,13 @@ def run_cycle(
     if evidence is not None:
         observation_record["evidence"] = evidence
 
-    candidate_record = build_candidate(candidate_summary, classification, evidence=evidence)
+    candidate_record = build_candidate(
+        cycle_id,
+        candidate_summary,
+        classification,
+        target_surface=target_surface or list(DEFAULT_TARGET_SURFACES[classification]),
+        evidence=evidence,
+    )
     decision, reason = classify_promotion(classification, requested_decision)
     promotion_record = OrderedDict(
         {
@@ -318,12 +420,14 @@ def run_cycle(
             "status": candidate_record["status"],
             "summary": candidate_record["summary"],
             "classification": candidate_record["classification"],
+            "target_surface": candidate_record["target_surface"],
             "updated_at": timestamp,
         }
     )
     loop_state["current_mode"] = mode
     loop_state["updated_at"] = timestamp
 
+    milestone_queue_entry = None
     if decision == "internal_promotion":
         prior_operator = dict(loop_state.get("operator_state", {}))
         if prior_operator:
@@ -341,6 +445,9 @@ def run_cycle(
 
     dump_json(loop_state_path, loop_state)
 
+    if decision == "milestone_promotion_required":
+        milestone_queue_entry = queue_milestone_candidate(repo_root, cycle_id, candidate_record, promotion_record)
+
     report = OrderedDict(
         {
             "cycle_id": cycle_id,
@@ -348,8 +455,9 @@ def run_cycle(
             "observation": observation_record,
             "candidate": candidate_record,
             "promotion": promotion_record,
-            "operator_state": loop_state.get("operator_state"),
-            "candidate_state": loop_state.get("candidate_state"),
+            "operator_state": normalize_loop_state(load_json(loop_state_path)).get("operator_state"),
+            "candidate_state": normalize_loop_state(load_json(loop_state_path)).get("candidate_state"),
+            "milestone_queue_entry": milestone_queue_entry,
             "generated_at": timestamp,
         }
     )
@@ -370,7 +478,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--evidence-path", help="Relative path to execution evidence JSON to ingest.")
     parser.add_argument("--evidence-report-path", default=DEFAULT_EVIDENCE_REPORT_PATH, help="Relative path for ingested evidence report JSON.")
     parser.add_argument("--ingest-repo-state", action="store_true", help="Derive observation/candidate/evidence from .hermes-flow repo state.")
+    parser.add_argument("--apply-milestone-queue-id", help="Apply a pending milestone queue entry by queue id.")
     args = parser.parse_args()
+    if args.apply_milestone_queue_id:
+        if args.evidence_path or args.observation or args.candidate_summary or args.promotion_decision or args.classification is not None or args.ingest_repo_state:
+            parser.error("--apply-milestone-queue-id cannot be combined with cycle-generation flags.")
+        return args
     if args.ingest_repo_state:
         if args.evidence_path or args.observation or args.candidate_summary or args.promotion_decision or args.classification is not None:
             parser.error("--ingest-repo-state cannot be combined with --evidence-path, --observation, --candidate-summary, --promotion-decision, or an explicit --classification override.")
@@ -382,7 +495,7 @@ def parse_args() -> argparse.Namespace:
     if args.evidence_path and not args.candidate_summary:
         args.candidate_summary = "derive loop-core improvement from ingested execution evidence"
     if not args.observation or not args.candidate_summary:
-        parser.error("Either provide --observation and --candidate-summary, provide --evidence-path to auto-ingest evidence, or use --ingest-repo-state.")
+        parser.error("Either provide --observation and --candidate-summary, provide --evidence-path to auto-ingest evidence, use --ingest-repo-state, or apply a milestone queue entry.")
     return args
 
 
@@ -390,13 +503,19 @@ def main() -> int:
     args = parse_args()
     repo_root = find_repo_root(Path.cwd())
 
+    if args.apply_milestone_queue_id:
+        applied = apply_milestone_promotion(repo_root, args.apply_milestone_queue_id)
+        print(json.dumps(applied, ensure_ascii=False))
+        return 0
+
     evidence = None
     observation = args.observation
     candidate_summary = args.candidate_summary
     classification = args.classification
+    target_surface = None
 
     if args.ingest_repo_state:
-        evidence, observation, candidate_summary, classification = build_loop_candidate_from_repo_state(repo_root)
+        evidence, observation, candidate_summary, classification, target_surface = build_loop_candidate_from_repo_state(repo_root)
 
     validate_cycle_request(
         repo_root,
@@ -419,6 +538,7 @@ def main() -> int:
         report_path=args.report_path,
         requested_decision=args.promotion_decision,
         evidence=evidence,
+        target_surface=target_surface,
     )
     print(str(report_path))
     return 0
