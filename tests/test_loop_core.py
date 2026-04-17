@@ -187,6 +187,130 @@ def test_run_loop_core_cycle_autonomously_applies_control_plane_candidate_in_gov
     assert queue["applied"][0]["queue_id"] == report["milestone_queue_entry"]["queue_id"]
 
 
+def test_review_milestone_queue_entry_accepts_candidate_and_promotes_operator_state(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+
+    for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
+        copy_script(repo_root, script_name)
+
+    bootstrap_repo(repo_root)
+
+    cycle_proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--observation",
+            "control-plane thresholds changed under review pressure",
+            "--candidate-summary",
+            "tighten promotion thresholds for control-plane rules",
+            "--classification",
+            "control_plane_policy",
+            "--mode",
+            "delivery",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    cycle_report = json.loads((repo_root / Path(cycle_proc.stdout.strip())).read_text(encoding="utf-8"))
+    queue_id = cycle_report["milestone_queue_entry"]["queue_id"]
+
+    review_proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--review-milestone-queue-id",
+            queue_id,
+            "--review-decision",
+            "accepted",
+            "--review-reason",
+            "milestone review approved this control-plane improvement",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    reviewed = json.loads(review_proc.stdout)
+    assert reviewed["queue_id"] == queue_id
+    assert reviewed["status"] == "applied"
+    assert reviewed["review_decision"] == "accepted"
+
+    queue = json.loads((repo_root / ".hermes-flow" / "milestone-queue.json").read_text(encoding="utf-8"))
+    assert queue["pending"] == []
+    assert len(queue["applied"]) == 1
+    assert queue["applied"][0]["review_decision"] == "accepted"
+
+    loop_state = json.loads((repo_root / ".hermes-flow" / "loop-core-state.json").read_text(encoding="utf-8"))
+    assert loop_state["operator_state"]["state_id"] == cycle_report["candidate"]["candidate_id"]
+    assert loop_state["candidate_state"] is None
+
+
+def test_review_milestone_queue_entry_rejects_candidate_and_clears_candidate_state(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+
+    for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
+        copy_script(repo_root, script_name)
+
+    bootstrap_repo(repo_root)
+
+    cycle_proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--observation",
+            "control-plane thresholds changed under review pressure",
+            "--candidate-summary",
+            "tighten promotion thresholds for control-plane rules",
+            "--classification",
+            "control_plane_policy",
+            "--mode",
+            "delivery",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    cycle_report = json.loads((repo_root / Path(cycle_proc.stdout.strip())).read_text(encoding="utf-8"))
+    queue_id = cycle_report["milestone_queue_entry"]["queue_id"]
+
+    review_proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--review-milestone-queue-id",
+            queue_id,
+            "--review-decision",
+            "rejected",
+            "--review-reason",
+            "milestone review rejected this candidate",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    reviewed = json.loads(review_proc.stdout)
+    assert reviewed["status"] == "rejected"
+    assert reviewed["review_decision"] == "rejected"
+
+    queue = json.loads((repo_root / ".hermes-flow" / "milestone-queue.json").read_text(encoding="utf-8"))
+    assert queue["pending"] == []
+    assert len(queue["rejected"]) == 1
+
+    loop_state = json.loads((repo_root / ".hermes-flow" / "loop-core-state.json").read_text(encoding="utf-8"))
+    assert loop_state["operator_state"]["state_id"] == "accepted-baseline"
+    assert loop_state["candidate_state"] is None
+
+
 def test_apply_milestone_queue_entry_promotes_candidate_to_operator_state(tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
@@ -366,6 +490,66 @@ def test_apply_milestone_queue_entry_preserves_newer_candidate_state(tmp_path: P
     loop_state = json.loads((repo_root / ".hermes-flow" / "loop-core-state.json").read_text(encoding="utf-8"))
     assert loop_state["operator_state"]["state_id"] == first_report["candidate"]["candidate_id"]
     assert loop_state["candidate_state"]["candidate_id"] == second_report["candidate"]["candidate_id"]
+
+
+def test_review_milestone_queue_entry_requires_decision_and_reason(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+
+    for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
+        copy_script(repo_root, script_name)
+
+    bootstrap_repo(repo_root)
+
+    proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--review-milestone-queue-id",
+            "milestone-loop-cycle-001",
+            "--review-decision",
+            "accepted",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode != 0
+    assert "requires both --review-decision and --review-reason" in proc.stderr
+
+
+def test_review_milestone_queue_entry_rejects_mixed_flags(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+
+    for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
+        copy_script(repo_root, script_name)
+
+    bootstrap_repo(repo_root)
+
+    proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--review-milestone-queue-id",
+            "milestone-loop-cycle-001",
+            "--review-decision",
+            "accepted",
+            "--review-reason",
+            "approve",
+            "--observation",
+            "should fail",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode != 0
+    assert "cannot be combined" in proc.stderr
 
 
 def test_apply_milestone_queue_entry_rejects_mixed_flags(tmp_path: Path) -> None:

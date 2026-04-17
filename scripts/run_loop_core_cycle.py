@@ -14,6 +14,7 @@ ARTIFACTS_INDEX_PATH = ".hermes-flow/artifacts-index.json"
 VERIFICATION_STATE_PATH = ".hermes-flow/verification-state.json"
 RUN_STATE_PATH = ".hermes-flow/run-state.json"
 MILESTONE_QUEUE_PATH = ".hermes-flow/milestone-queue.json"
+MILESTONE_REVIEW_DECISIONS = {"accepted", "rejected", "deferred"}
 DEFAULT_REPORT_PATH = "artifacts/reports/latest-loop-cycle.json"
 DEFAULT_EVIDENCE_REPORT_PATH = "artifacts/reports/latest-execution-evidence.json"
 PROMOTION_LADDER = {
@@ -364,12 +365,89 @@ def recalculate_candidate_state(loop_state: dict[str, Any], queue: dict[str, Any
     )
 
 
+def apply_milestone_review_decision(repo_root: Path, queue_id: str, decision: str, decision_reason: str) -> OrderedDict:
+    if decision not in MILESTONE_REVIEW_DECISIONS:
+        raise ValueError(f"Unsupported milestone review decision: {decision}")
+    queue_path = repo_root / MILESTONE_QUEUE_PATH
+    loop_state_path = repo_root / LOOP_CORE_STATE_PATH
+    queue = load_json(queue_path)
+    loop_state = normalize_loop_state(load_json(loop_state_path))
+
+    queue.setdefault("applied", [])
+    queue.setdefault("rejected", [])
+    queue.setdefault("deferred", [])
+    pending = queue.get("pending", [])
+    entry = next((item for item in pending if item.get("queue_id") == queue_id), None)
+    if entry is None:
+        raise ValueError(f"Unknown milestone queue entry: {queue_id}")
+
+    pending[:] = [item for item in pending if item.get("queue_id") != queue_id]
+    reviewed_entry = OrderedDict(entry)
+    reviewed_entry["review_decision"] = decision
+    reviewed_entry["review_reason"] = decision_reason
+    reviewed_entry["reviewed_at"] = utc_now()
+
+    if decision == "accepted":
+        reviewed_entry["status"] = "applied"
+        queue.setdefault("applied", []).append(reviewed_entry)
+        prior_operator = dict(loop_state.get("operator_state", {}))
+        if prior_operator:
+            loop_state.setdefault("accepted_state_history", []).append(prior_operator)
+        loop_state["operator_state"] = OrderedDict(
+            {
+                "state_id": reviewed_entry["candidate_id"],
+                "status": "accepted",
+                "summary": reviewed_entry["summary"],
+                "updated_at": reviewed_entry["reviewed_at"],
+            }
+        )
+        if loop_state.get("candidate_state", {}).get("candidate_id") == reviewed_entry["candidate_id"]:
+            loop_state["candidate_state"] = None
+        loop_state["candidate_state"] = recalculate_candidate_state(loop_state, queue)
+        candidate_status = "milestone_applied"
+        promotion_field = "applied_at"
+    elif decision == "rejected":
+        reviewed_entry["status"] = "rejected"
+        queue.setdefault("rejected", []).append(reviewed_entry)
+        if loop_state.get("candidate_state", {}).get("candidate_id") == reviewed_entry["candidate_id"]:
+            loop_state["candidate_state"] = recalculate_candidate_state(loop_state, queue)
+        candidate_status = "milestone_rejected"
+        promotion_field = "rejected_at"
+    else:
+        reviewed_entry["status"] = "deferred"
+        queue.setdefault("deferred", []).append(reviewed_entry)
+        if loop_state.get("candidate_state", {}).get("candidate_id") == reviewed_entry["candidate_id"]:
+            loop_state["candidate_state"] = recalculate_candidate_state(loop_state, queue)
+        candidate_status = "milestone_deferred"
+        promotion_field = "deferred_at"
+
+    queue["updated_at"] = utc_now()
+    dump_json(queue_path, queue)
+
+    for candidate in loop_state.get("candidates", []):
+        if candidate.get("candidate_id") == reviewed_entry["candidate_id"]:
+            candidate["status"] = candidate_status
+            break
+    for promotion in loop_state.get("promotions", []):
+        if promotion.get("candidate_id") == reviewed_entry["candidate_id"]:
+            promotion[promotion_field] = reviewed_entry["reviewed_at"]
+            promotion["review_decision"] = decision
+            break
+    loop_state["updated_at"] = utc_now()
+    dump_json(loop_state_path, loop_state)
+    append_artifact(repo_root, "milestone_review_decision", str(queue_path), "omh-loop-core-runner-v1")
+    return reviewed_entry
+
+
 def apply_milestone_promotion(repo_root: Path, queue_id: str) -> OrderedDict:
     queue_path = repo_root / MILESTONE_QUEUE_PATH
     loop_state_path = repo_root / LOOP_CORE_STATE_PATH
     queue = load_json(queue_path)
     loop_state = normalize_loop_state(load_json(loop_state_path))
 
+    queue.setdefault("applied", [])
+    queue.setdefault("rejected", [])
+    queue.setdefault("deferred", [])
     pending = queue.get("pending", [])
     entry = next((item for item in pending if item.get("queue_id") == queue_id), None)
     if entry is None:
@@ -557,7 +635,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--evidence-report-path", default=DEFAULT_EVIDENCE_REPORT_PATH, help="Relative path for ingested evidence report JSON.")
     parser.add_argument("--ingest-repo-state", action="store_true", help="Derive observation/candidate/evidence from .hermes-flow repo state.")
     parser.add_argument("--apply-milestone-queue-id", help="Apply a pending milestone queue entry by queue id.")
+    parser.add_argument("--review-milestone-queue-id", help="Review a pending milestone queue entry by queue id.")
+    parser.add_argument("--review-decision", choices=sorted(MILESTONE_REVIEW_DECISIONS), help="Milestone review decision for --review-milestone-queue-id.")
+    parser.add_argument("--review-reason", help="Reason for the milestone review decision.")
     args = parser.parse_args()
+    if args.review_milestone_queue_id:
+        if not args.review_decision or not args.review_reason:
+            parser.error("--review-milestone-queue-id requires both --review-decision and --review-reason.")
+        if args.apply_milestone_queue_id or args.evidence_path or args.observation or args.candidate_summary or args.promotion_decision or args.classification is not None or args.ingest_repo_state:
+            parser.error("--review-milestone-queue-id cannot be combined with apply or cycle-generation flags.")
+        return args
     if args.apply_milestone_queue_id:
         if args.evidence_path or args.observation or args.candidate_summary or args.promotion_decision or args.classification is not None or args.ingest_repo_state:
             parser.error("--apply-milestone-queue-id cannot be combined with cycle-generation flags.")
@@ -580,6 +667,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     repo_root = find_repo_root(Path.cwd())
+
+    if args.review_milestone_queue_id:
+        reviewed = apply_milestone_review_decision(repo_root, args.review_milestone_queue_id, args.review_decision, args.review_reason)
+        print(json.dumps(reviewed, ensure_ascii=False))
+        return 0
 
     if args.apply_milestone_queue_id:
         applied = apply_milestone_promotion(repo_root, args.apply_milestone_queue_id)
