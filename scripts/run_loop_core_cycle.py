@@ -262,7 +262,17 @@ def build_governance_learning_signal(history_summary: dict[str, Any]) -> Ordered
     rejected_count = int(history_summary.get("rejected_count", 0))
     deferred_count = int(history_summary.get("deferred_count", 0))
     applied_count = int(history_summary.get("applied_count", 0))
-    if rejected_count or deferred_count:
+    if rejected_count:
+        return OrderedDict(
+            {
+                "signal_type": "governance_history_learning",
+                "pattern": "governance_rejection_present",
+                "lesson": "Recent milestone history shows at least one control-plane candidate was formally rejected.",
+                "recommended_boundary": "raise the boundary and treat similar changes as requiring higher-level product judgment",
+                "history_summary": history_summary,
+            }
+        )
+    if deferred_count:
         return OrderedDict(
             {
                 "signal_type": "governance_history_learning",
@@ -272,12 +282,22 @@ def build_governance_learning_signal(history_summary: dict[str, Any]) -> Ordered
                 "history_summary": history_summary,
             }
         )
+    if applied_count >= 2:
+        return OrderedDict(
+            {
+                "signal_type": "governance_history_learning",
+                "pattern": "governance_flow_stable",
+                "lesson": "Recent milestone history shows accepted control-plane candidates are resolving cleanly.",
+                "recommended_boundary": "stable governance patterns may be absorbed into internal operating rules when no fresh blockers appear",
+                "history_summary": history_summary,
+            }
+        )
     return OrderedDict(
         {
             "signal_type": "governance_history_learning",
-            "pattern": "governance_flow_stable",
-            "lesson": "Recent milestone history shows accepted control-plane candidates are resolving cleanly.",
-            "recommended_boundary": "maintain current autonomy boundary while continuing to monitor review outcomes",
+            "pattern": "governance_flow_observing",
+            "lesson": "Milestone history is still too small to justify widening or tightening the boundary.",
+            "recommended_boundary": "continue observing before changing the governance level",
             "history_summary": history_summary,
         }
     )
@@ -340,9 +360,15 @@ def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, 
     if task_summary["blocking_bug_count"] or phase_summary["blocking_bug_count"]:
         candidate_summary = "tighten review and verification governance based on repo-state blockers"
         classification = "control_plane_policy"
+    elif governance_learning_signal and governance_learning_signal.get("pattern") == "governance_rejection_present":
+        candidate_summary = "raise the boundary for recurring rejected governance changes"
+        classification = "product_contract_rule"
     elif governance_learning_signal and governance_learning_signal.get("pattern") == "governance_friction_present":
         candidate_summary = "keep milestone stop boundaries legible based on historical governance friction"
         classification = "control_plane_policy"
+    elif governance_learning_signal and governance_learning_signal.get("pattern") == "governance_flow_stable":
+        candidate_summary = "absorb stable governance pattern into internal operating rule"
+        classification = "internal_operating_rule"
     elif (
         task_summary["has_reviews"]
         and phase_summary["has_reviews"]
