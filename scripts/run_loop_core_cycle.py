@@ -303,7 +303,46 @@ def build_governance_learning_signal(history_summary: dict[str, Any]) -> Ordered
     )
 
 
-def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, str, str, str, list[str], bool, dict[str, Any] | None, dict[str, Any] | None]:
+def apply_governance_learning_to_run_state(run_state: dict[str, Any], governance_learning_signal: dict[str, Any] | None) -> OrderedDict | None:
+    if governance_learning_signal is None:
+        return None
+    policy = normalize_run_state(run_state).get("self_evolve", {})
+    update = OrderedDict(
+        {
+            "artifact_type": "治理策略调整建议",
+            "based_on_pattern": governance_learning_signal.get("pattern"),
+            "previous_mode": run_state.get("mode"),
+            "previous_auto_apply_control_plane": policy.get("auto_apply_control_plane"),
+        }
+    )
+    pattern = governance_learning_signal.get("pattern")
+    if pattern == "governance_rejection_present":
+        run_state["mode"] = "governance-hardening"
+        policy["auto_apply_control_plane"] = False
+        update["recommended_mode"] = "governance-hardening"
+        update["recommended_auto_apply_control_plane"] = False
+        update["reason"] = "历史上已经出现正式拒绝，应收紧治理强度并关闭中间层自动推进。"
+    elif pattern == "governance_friction_present":
+        run_state["mode"] = "governance-hardening"
+        policy["auto_apply_control_plane"] = False
+        update["recommended_mode"] = "governance-hardening"
+        update["recommended_auto_apply_control_plane"] = False
+        update["reason"] = "历史上存在推迟记录，应保持较强治理并继续清晰停止边界。"
+    elif pattern == "governance_flow_stable":
+        run_state["mode"] = "self-evolve"
+        policy["auto_apply_control_plane"] = True
+        update["recommended_mode"] = "self-evolve"
+        update["recommended_auto_apply_control_plane"] = True
+        update["reason"] = "历史上连续稳定通过，可转入更积极的自进化运行策略。"
+    else:
+        update["recommended_mode"] = run_state.get("mode")
+        update["recommended_auto_apply_control_plane"] = policy.get("auto_apply_control_plane")
+        update["reason"] = "历史样本仍不足，维持当前运行策略。"
+    run_state["self_evolve"] = policy
+    return update
+
+
+def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, str, str, str, list[str], bool, dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
     run_state = normalize_run_state(load_json(repo_root / RUN_STATE_PATH))
     verification_state = load_json(repo_root / VERIFICATION_STATE_PATH)
     milestone_queue = load_json(repo_root / MILESTONE_QUEUE_PATH)
@@ -324,6 +363,7 @@ def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, 
     )
     milestone_history_summary = summarize_milestone_history(milestone_queue)
     governance_learning_signal = build_governance_learning_signal(milestone_history_summary)
+    strategy_update = apply_governance_learning_to_run_state(run_state, governance_learning_signal)
     evidence = OrderedDict(
         {
             "source": "repo_state",
@@ -342,6 +382,7 @@ def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, 
             "verification_summary": verification_summary,
             "milestone_history_summary": milestone_history_summary,
             "governance_learning_signal": governance_learning_signal,
+            "strategy_update": strategy_update,
             "captured_at": utc_now(),
         }
     )
@@ -406,7 +447,9 @@ def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, 
         )
 
     target_surface = list(DEFAULT_TARGET_SURFACES[classification])
-    return evidence, observation, candidate_summary, classification, target_surface, should_stop_at_milestone, milestone_stop_artifact, governance_learning_signal
+    dump_json(repo_root / RUN_STATE_PATH, run_state)
+    append_artifact(repo_root, "governance_strategy_update", RUN_STATE_PATH, "omh-loop-core-runner-v1")
+    return evidence, observation, candidate_summary, classification, target_surface, should_stop_at_milestone, milestone_stop_artifact, governance_learning_signal, strategy_update
 
 
 def queue_milestone_candidate(repo_root: Path, cycle_id: str, candidate_record: dict[str, Any], promotion_record: dict[str, Any], milestone_stop_artifact: dict[str, Any] | None = None) -> OrderedDict:
@@ -801,10 +844,11 @@ def main() -> int:
     repo_state_requested_stop = False
     milestone_stop_artifact = None
     governance_learning_signal = None
+    strategy_update = None
 
     if args.ingest_repo_state:
         repo_run_state = normalize_run_state(load_json(repo_root / RUN_STATE_PATH))
-        evidence, observation, candidate_summary, classification, target_surface, repo_state_requested_stop, milestone_stop_artifact, governance_learning_signal = build_loop_candidate_from_repo_state(repo_root)
+        evidence, observation, candidate_summary, classification, target_surface, repo_state_requested_stop, milestone_stop_artifact, governance_learning_signal, strategy_update = build_loop_candidate_from_repo_state(repo_root)
 
     auto_apply_queued_milestone = should_auto_apply_milestone(
         args.mode,
