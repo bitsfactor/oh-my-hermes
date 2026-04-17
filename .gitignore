@@ -1,0 +1,7 @@
+.hermes-flow/
+artifacts/
+memory/
+__pycache__/
+*.pyc
+.venv/
+.env
