@@ -118,8 +118,16 @@ def main() -> int:
             "loop-core-state.json": OrderedDict(
                 {
                     "core_name": "回环核心",
-                    "operator_state": "accepted_baseline",
+                    "operator_state": OrderedDict(
+                        {
+                            "state_id": "accepted-baseline",
+                            "status": "accepted",
+                            "summary": "Current trusted omh baseline",
+                            "updated_at": None,
+                        }
+                    ),
                     "candidate_state": None,
+                    "accepted_state_history": [],
                     "last_cycle_id": None,
                     "current_mode": "governance-hardening",
                     "observations": [],

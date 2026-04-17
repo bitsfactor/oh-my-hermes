@@ -12,6 +12,29 @@ from typing import Any
 LOOP_CORE_STATE_PATH = ".hermes-flow/loop-core-state.json"
 ARTIFACTS_INDEX_PATH = ".hermes-flow/artifacts-index.json"
 DEFAULT_REPORT_PATH = "artifacts/reports/latest-loop-cycle.json"
+DEFAULT_EVIDENCE_REPORT_PATH = "artifacts/reports/latest-execution-evidence.json"
+PROMOTION_LADDER = {
+    "record_only",
+    "internal_promotion",
+    "milestone_promotion_required",
+    "user_decision_required",
+}
+ALLOWED_CLASSIFICATIONS = {
+    "internal_operating_rule",
+    "control_plane_policy",
+    "product_contract_rule",
+}
+MINIMUM_DECISION_RANK = {
+    "record_only": 0,
+    "internal_promotion": 1,
+    "milestone_promotion_required": 2,
+    "user_decision_required": 3,
+}
+CLASSIFICATION_MINIMUM_DECISION = {
+    "internal_operating_rule": "internal_promotion",
+    "control_plane_policy": "milestone_promotion_required",
+    "product_contract_rule": "user_decision_required",
+}
 
 
 def utc_now() -> str:
@@ -64,8 +87,58 @@ def next_cycle_id(loop_state: dict[str, Any]) -> str:
     return f"{prefix}-{int(number) + 1:03d}"
 
 
-def build_candidate(summary: str, classification: str, target_file: str = "", auto_apply: bool = False) -> OrderedDict:
-    return OrderedDict(
+def normalize_loop_state(loop_state: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(loop_state.get("operator_state"), str):
+        loop_state["operator_state"] = OrderedDict(
+            {
+                "state_id": loop_state["operator_state"],
+                "status": "accepted",
+                "summary": "Migrated accepted baseline",
+                "updated_at": loop_state.get("updated_at"),
+            }
+        )
+    loop_state.setdefault("accepted_state_history", [])
+    loop_state.setdefault("observations", [])
+    loop_state.setdefault("candidates", [])
+    loop_state.setdefault("promotions", [])
+    return loop_state
+
+
+def classify_promotion(classification: str, requested_decision: str | None) -> tuple[str, str]:
+    if classification not in ALLOWED_CLASSIFICATIONS:
+        raise ValueError(f"Unsupported classification: {classification}")
+    minimum_decision = CLASSIFICATION_MINIMUM_DECISION[classification]
+    if requested_decision:
+        if requested_decision not in PROMOTION_LADDER:
+            raise ValueError(f"Unsupported promotion decision: {requested_decision}")
+        if MINIMUM_DECISION_RANK[requested_decision] < MINIMUM_DECISION_RANK[minimum_decision]:
+            raise ValueError(
+                f"Requested promotion decision {requested_decision} violates minimum governance boundary {minimum_decision} for {classification}"
+            )
+        return requested_decision, "Explicit decision requested by operator."
+
+    if classification == "product_contract_rule":
+        return "user_decision_required", "Contract-level candidates must not silently promote."
+    if classification == "control_plane_policy":
+        return "milestone_promotion_required", "Control-plane policy changes require milestone review."
+    return "internal_promotion", "Internal operating rule is eligible for autonomous internal promotion."
+
+
+def validate_cycle_request(repo_root: Path, classification: str, requested_decision: str | None, report_path: str, evidence_path: str | None = None, evidence_report_path: str | None = None) -> None:
+    repo_root_resolved = repo_root.resolve()
+    classify_promotion(classification, requested_decision)
+    candidate_paths = [(repo_root / report_path).resolve()]
+    if evidence_path is not None:
+        candidate_paths.append((repo_root / evidence_path).resolve())
+    if evidence_report_path is not None:
+        candidate_paths.append((repo_root / evidence_report_path).resolve())
+    for candidate_path in candidate_paths:
+        if not candidate_path.is_relative_to(repo_root_resolved):
+            raise ValueError(f"Path escapes repo root: {candidate_path}")
+
+
+def build_candidate(summary: str, classification: str, target_file: str = "", auto_apply: bool = False, evidence: dict[str, Any] | None = None) -> OrderedDict:
+    candidate = OrderedDict(
         {
             "candidate_id": f"candidate-{utc_now().replace(':', '').replace('-', '')}",
             "summary": summary,
@@ -76,11 +149,53 @@ def build_candidate(summary: str, classification: str, target_file: str = "", au
             "created_at": utc_now(),
         }
     )
+    if evidence is not None:
+        candidate["evidence"] = evidence
+    return candidate
 
 
-def run_cycle(repo_root: Path, observation: str, candidate_summary: str, classification: str, mode: str, report_path: str) -> Path:
+def ingest_execution_evidence(repo_root: Path, evidence_path: str, report_path: str) -> tuple[OrderedDict, Path]:
+    source_path = (repo_root / evidence_path).resolve()
+    evidence = load_json(source_path)
+    summary_bits: list[str] = []
+    if evidence.get("task_id"):
+        summary_bits.append(f"task={evidence['task_id']}")
+    if evidence.get("phase_id"):
+        summary_bits.append(f"phase={evidence['phase_id']}")
+    if evidence.get("review_clear") is not None:
+        summary_bits.append(f"review_clear={evidence['review_clear']}")
+    if evidence.get("verification_passed") is not None:
+        summary_bits.append(f"verification_passed={evidence['verification_passed']}")
+    if evidence.get("signal"):
+        summary_bits.append(f"signal={evidence['signal']}")
+
+    ingested = OrderedDict(
+        {
+            "source_path": str(source_path),
+            "summary": "; ".join(summary_bits) or "execution evidence ingested",
+            "payload": evidence,
+            "ingested_at": utc_now(),
+        }
+    )
+    final_report_path = repo_root / report_path
+    dump_json(final_report_path, ingested)
+    append_artifact(repo_root, "execution_evidence_report", str(final_report_path), "omh-loop-core-runner-v1")
+    return ingested, final_report_path
+
+
+def run_cycle(
+    repo_root: Path,
+    observation: str,
+    candidate_summary: str,
+    classification: str,
+    mode: str,
+    report_path: str,
+    requested_decision: str | None = None,
+    evidence: dict[str, Any] | None = None,
+) -> Path:
     loop_state_path = repo_root / LOOP_CORE_STATE_PATH
-    loop_state = load_json(loop_state_path)
+    report_output_path = (repo_root / report_path).resolve()
+    loop_state = normalize_loop_state(load_json(loop_state_path))
     cycle_id = next_cycle_id(loop_state)
     timestamp = utc_now()
 
@@ -91,12 +206,16 @@ def run_cycle(repo_root: Path, observation: str, candidate_summary: str, classif
             "captured_at": timestamp,
         }
     )
-    candidate_record = build_candidate(candidate_summary, classification)
+    if evidence is not None:
+        observation_record["evidence"] = evidence
+
+    candidate_record = build_candidate(candidate_summary, classification, evidence=evidence)
+    decision, reason = classify_promotion(classification, requested_decision)
     promotion_record = OrderedDict(
         {
             "cycle_id": cycle_id,
-            "decision": "record_only",
-            "reason": "Loop-core bootstrap keeps promotion conservative until stronger governance exists.",
+            "decision": decision,
+            "reason": reason,
             "decided_at": timestamp,
             "candidate_id": candidate_record["candidate_id"],
         }
@@ -106,9 +225,33 @@ def run_cycle(repo_root: Path, observation: str, candidate_summary: str, classif
     loop_state.setdefault("candidates", []).append(candidate_record)
     loop_state.setdefault("promotions", []).append(promotion_record)
     loop_state["last_cycle_id"] = cycle_id
-    loop_state["candidate_state"] = candidate_record["candidate_id"]
+    loop_state["candidate_state"] = OrderedDict(
+        {
+            "candidate_id": candidate_record["candidate_id"],
+            "status": candidate_record["status"],
+            "summary": candidate_record["summary"],
+            "classification": candidate_record["classification"],
+            "updated_at": timestamp,
+        }
+    )
     loop_state["current_mode"] = mode
     loop_state["updated_at"] = timestamp
+
+    if decision == "internal_promotion":
+        prior_operator = dict(loop_state.get("operator_state", {}))
+        if prior_operator:
+            loop_state.setdefault("accepted_state_history", []).append(prior_operator)
+        loop_state["operator_state"] = OrderedDict(
+            {
+                "state_id": candidate_record["candidate_id"],
+                "status": "accepted",
+                "summary": candidate_record["summary"],
+                "updated_at": timestamp,
+            }
+        )
+        candidate_record["status"] = "auto_applied"
+        loop_state["candidate_state"] = None
+
     dump_json(loop_state_path, loop_state)
 
     report = OrderedDict(
@@ -118,29 +261,51 @@ def run_cycle(repo_root: Path, observation: str, candidate_summary: str, classif
             "observation": observation_record,
             "candidate": candidate_record,
             "promotion": promotion_record,
-            "operator_state": loop_state.get("operator_state", "accepted_baseline"),
+            "operator_state": loop_state.get("operator_state"),
+            "candidate_state": loop_state.get("candidate_state"),
             "generated_at": timestamp,
         }
     )
-    final_report_path = repo_root / report_path
+    final_report_path = report_output_path
     dump_json(final_report_path, report)
     append_artifact(repo_root, "loop_cycle_report", str(final_report_path), "omh-loop-core-runner-v1")
     return final_report_path
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run one conservative 回环核心 cycle for omh.")
-    parser.add_argument("--observation", required=True, help="Observed runtime or design signal.")
-    parser.add_argument("--candidate-summary", required=True, help="Proposed improvement summary.")
+    parser = argparse.ArgumentParser(description="Run one governed 回环核心 cycle for omh.")
+    parser.add_argument("--observation", help="Observed runtime or design signal.")
+    parser.add_argument("--candidate-summary", help="Proposed improvement summary.")
     parser.add_argument("--classification", default="internal_operating_rule", help="Candidate classification.")
     parser.add_argument("--mode", default="governance-hardening", help="Loop operating mode.")
     parser.add_argument("--report-path", default=DEFAULT_REPORT_PATH, help="Relative path for cycle report JSON.")
-    return parser.parse_args()
+    parser.add_argument("--promotion-decision", choices=sorted(PROMOTION_LADDER), help="Force a promotion-ladder decision.")
+    parser.add_argument("--evidence-path", help="Relative path to execution evidence JSON to ingest.")
+    parser.add_argument("--evidence-report-path", default=DEFAULT_EVIDENCE_REPORT_PATH, help="Relative path for ingested evidence report JSON.")
+    args = parser.parse_args()
+    if args.evidence_path and not args.observation:
+        args.observation = "execution evidence ingested"
+    if args.evidence_path and not args.candidate_summary:
+        args.candidate_summary = "derive loop-core improvement from ingested execution evidence"
+    if not args.observation or not args.candidate_summary:
+        parser.error("Either provide --observation and --candidate-summary, or provide --evidence-path to auto-ingest evidence.")
+    return args
 
 
 def main() -> int:
     args = parse_args()
     repo_root = find_repo_root(Path.cwd())
+    validate_cycle_request(
+        repo_root,
+        classification=args.classification,
+        requested_decision=args.promotion_decision,
+        report_path=args.report_path,
+        evidence_path=args.evidence_path,
+        evidence_report_path=args.evidence_report_path if args.evidence_path else None,
+    )
+    evidence = None
+    if args.evidence_path:
+        evidence, _ = ingest_execution_evidence(repo_root, args.evidence_path, args.evidence_report_path)
     report_path = run_cycle(
         repo_root,
         observation=args.observation,
@@ -148,6 +313,8 @@ def main() -> int:
         classification=args.classification,
         mode=args.mode,
         report_path=args.report_path,
+        requested_decision=args.promotion_decision,
+        evidence=evidence,
     )
     print(str(report_path))
     return 0

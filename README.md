@@ -22,8 +22,13 @@ See `docs/plans/` for the current product design stack.
 ## Executable loop-core seed
 The repo now contains the first concrete executable slice of the 回环核心:
 - `scripts/bootstrap_omh.py` initializes omh's own loop-core control surface
-- `scripts/run_loop_core_cycle.py` runs one conservative recursive loop cycle
-- `tests/test_loop_core.py` verifies bootstrap + one loop-cycle report end to end
+- `scripts/run_loop_core_cycle.py` runs one governed recursive loop cycle
+- `tests/test_loop_core.py` verifies bootstrap, promotion behavior, and evidence-ingest behavior end to end
 
-This is not the full product yet.
+Current executable abilities:
+- explicit accepted operator state vs candidate state
+- promotion ladder with internal promotion / milestone review / user-decision boundaries
+- evidence auto-ingest from execution-result JSON into the loop cycle
+
+This is still not the full product.
 It is the first repo-owned executable proof that omh can begin to operate on omh through a governed recursive loop.
