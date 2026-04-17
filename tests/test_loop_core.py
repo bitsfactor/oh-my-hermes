@@ -770,6 +770,69 @@ def test_run_loop_core_cycle_rejects_mixed_repo_state_and_evidence_inputs(tmp_pa
     assert "cannot be combined" in proc.stderr
 
 
+def test_run_loop_core_cycle_ingests_repo_state_and_stops_at_milestone_boundary_when_self_evolve_policy_disables_auto_apply(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+
+    for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
+        copy_script(repo_root, script_name)
+
+    bootstrap_repo(repo_root)
+
+    run_state = json.loads((repo_root / ".hermes-flow" / "run-state.json").read_text(encoding="utf-8"))
+    run_state["workflow_stage"] = "execute"
+    run_state["status"] = "blocked"
+    run_state["active_phase_id"] = "phase-loop-core"
+    run_state["active_task_id"] = "task-review"
+    run_state["mode"] = "governance-hardening"
+    run_state["self_evolve"]["auto_apply_control_plane"] = False
+    (repo_root / ".hermes-flow" / "run-state.json").write_text(json.dumps(run_state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    verification_state = json.loads((repo_root / ".hermes-flow" / "verification-state.json").read_text(encoding="utf-8"))
+    verification_state["task_review_state"] = {
+        "task-review": {
+            "round_count": 4,
+            "latest_blocking_bugs": ["promotion_boundary_unclear"],
+            "latest_clear": False,
+            "review_evidence": ["blocking bug remained after review"],
+            "updated_at": "2026-04-17T07:30:00Z",
+        }
+    }
+    verification_state["phase_review_state"] = {
+        "phase-loop-core": {
+            "round_count": 2,
+            "latest_blocking_bugs": [],
+            "latest_clear": True,
+            "review_evidence": ["phase review partially clear"],
+            "updated_at": "2026-04-17T07:30:00Z",
+        }
+    }
+    (repo_root / ".hermes-flow" / "verification-state.json").write_text(json.dumps(verification_state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--ingest-repo-state",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    report = json.loads((repo_root / Path(proc.stdout.strip())).read_text(encoding="utf-8"))
+    assert report["candidate"]["classification"] == "control_plane_policy"
+    assert report["promotion"]["decision"] == "milestone_promotion_required"
+    assert report["auto_applied_milestone_entry"] is None
+    assert report["candidate"]["summary"].endswith("stop at milestone boundary")
+
+    queue = json.loads((repo_root / ".hermes-flow" / "milestone-queue.json").read_text(encoding="utf-8"))
+    assert len(queue["pending"]) == 1
+    assert queue["applied"] == []
+
+
 def test_run_loop_core_cycle_ingests_repo_state_and_generates_control_plane_candidate(tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()

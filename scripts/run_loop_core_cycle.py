@@ -43,6 +43,13 @@ DEFAULT_TARGET_SURFACES = {
     "control_plane_policy": [".hermes-flow/verification-state.json", ".hermes-flow/milestone-queue.json", "docs/plans/"],
     "product_contract_rule": ["docs/plans/", "README.md"],
 }
+DEFAULT_SELF_EVOLVE_POLICY = OrderedDict(
+    {
+        "enabled": True,
+        "autonomous_modes": ["governance-hardening", "self-evolve"],
+        "auto_apply_control_plane": True,
+    }
+)
 AUTONOMOUS_SELF_EVOLVE_MODES = {"governance-hardening", "self-evolve"}
 
 
@@ -111,6 +118,15 @@ def normalize_loop_state(loop_state: dict[str, Any]) -> dict[str, Any]:
     loop_state.setdefault("candidates", [])
     loop_state.setdefault("promotions", [])
     return loop_state
+
+
+def normalize_run_state(run_state: dict[str, Any]) -> dict[str, Any]:
+    policy = OrderedDict(DEFAULT_SELF_EVOLVE_POLICY)
+    existing_policy = run_state.get("self_evolve")
+    if isinstance(existing_policy, dict):
+        policy.update(existing_policy)
+    run_state["self_evolve"] = policy
+    return run_state
 
 
 def classify_promotion(classification: str, requested_decision: str | None, allow_autonomous_milestone_apply: bool = False) -> tuple[str, str]:
@@ -214,8 +230,8 @@ def ingest_execution_evidence(repo_root: Path, evidence_path: str, report_path: 
     return ingested, final_report_path
 
 
-def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, str, str, str, list[str]]:
-    run_state = load_json(repo_root / RUN_STATE_PATH)
+def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, str, str, str, list[str], bool]:
+    run_state = normalize_run_state(load_json(repo_root / RUN_STATE_PATH))
     verification_state = load_json(repo_root / VERIFICATION_STATE_PATH)
 
     task_summary = summarize_task_review_state(verification_state.get("task_review_state", {}))
@@ -242,6 +258,7 @@ def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, 
                     "active_phase_id": run_state.get("active_phase_id"),
                     "active_task_id": run_state.get("active_task_id"),
                     "mode": run_state.get("mode"),
+                    "self_evolve": run_state.get("self_evolve"),
                 }
             ),
             "task_review_summary": task_summary,
@@ -256,6 +273,11 @@ def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, 
         f"status={run_state.get('status')}; task_blocking_bugs={task_summary['blocking_bug_count']}; "
         f"phase_blocking_bugs={phase_summary['blocking_bug_count']}"
     )
+
+    auto_apply_control_plane = bool(run_state.get("self_evolve", {}).get("auto_apply_control_plane", True))
+    self_evolve_enabled = bool(run_state.get("self_evolve", {}).get("enabled", True))
+    mode_allows_autonomy = run_state.get("mode") in set(run_state.get("self_evolve", {}).get("autonomous_modes", []))
+    should_stop_at_milestone = not (self_evolve_enabled and auto_apply_control_plane and mode_allows_autonomy)
 
     if task_summary["blocking_bug_count"] or phase_summary["blocking_bug_count"]:
         candidate_summary = "tighten review and verification governance based on repo-state blockers"
@@ -276,8 +298,11 @@ def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, 
         candidate_summary = "record stable repo-state signal without changing contract semantics"
         classification = "control_plane_policy"
 
+    if classification == "control_plane_policy" and should_stop_at_milestone:
+        candidate_summary = f"{candidate_summary} and stop at milestone boundary"
+
     target_surface = list(DEFAULT_TARGET_SURFACES[classification])
-    return evidence, observation, candidate_summary, classification, target_surface
+    return evidence, observation, candidate_summary, classification, target_surface, should_stop_at_milestone
 
 
 def queue_milestone_candidate(repo_root: Path, cycle_id: str, candidate_record: dict[str, Any], promotion_record: dict[str, Any]) -> OrderedDict:
@@ -480,12 +505,17 @@ def run_cycle(
     return final_report_path
 
 
-def should_auto_apply_milestone(mode: str, classification: str, requested_decision: str | None) -> bool:
-    return (
-        mode in AUTONOMOUS_SELF_EVOLVE_MODES
-        and classification == "control_plane_policy"
-        and requested_decision is None
-    )
+def should_auto_apply_milestone(mode: str, classification: str, requested_decision: str | None, run_state: dict[str, Any] | None = None, repo_state_requested_stop: bool = False) -> bool:
+    if repo_state_requested_stop:
+        return False
+    if classification != "control_plane_policy" or requested_decision is not None:
+        return False
+    policy = OrderedDict(DEFAULT_SELF_EVOLVE_POLICY)
+    if isinstance(run_state, dict):
+        normalized_run_state = normalize_run_state(dict(run_state))
+        policy.update(normalized_run_state.get("self_evolve", {}))
+        mode = normalized_run_state.get("mode", mode)
+    return bool(policy.get("enabled", True)) and bool(policy.get("auto_apply_control_plane", True)) and mode in set(policy.get("autonomous_modes", []))
 
 
 def parse_args() -> argparse.Namespace:
@@ -534,11 +564,20 @@ def main() -> int:
     candidate_summary = args.candidate_summary
     classification = args.classification
     target_surface = None
+    repo_run_state = None
+    repo_state_requested_stop = False
 
     if args.ingest_repo_state:
-        evidence, observation, candidate_summary, classification, target_surface = build_loop_candidate_from_repo_state(repo_root)
+        repo_run_state = normalize_run_state(load_json(repo_root / RUN_STATE_PATH))
+        evidence, observation, candidate_summary, classification, target_surface, repo_state_requested_stop = build_loop_candidate_from_repo_state(repo_root)
 
-    auto_apply_queued_milestone = should_auto_apply_milestone(args.mode, classification, args.promotion_decision)
+    auto_apply_queued_milestone = should_auto_apply_milestone(
+        args.mode,
+        classification,
+        args.promotion_decision,
+        run_state=repo_run_state,
+        repo_state_requested_stop=repo_state_requested_stop,
+    )
 
     validate_cycle_request(
         repo_root,
