@@ -1018,6 +1018,87 @@ def test_run_loop_core_cycle_rejects_mixed_repo_state_and_evidence_inputs(tmp_pa
     assert "cannot be combined" in proc.stderr
 
 
+def test_run_loop_core_cycle_uses_governance_history_learning_signal_when_recent_history_shows_friction(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+
+    for script_name in ["bootstrap_omh.py", "run_loop_core_cycle.py"]:
+        copy_script(repo_root, script_name)
+
+    bootstrap_repo(repo_root)
+
+    run_state = json.loads((repo_root / ".hermes-flow" / "run-state.json").read_text(encoding="utf-8"))
+    run_state["workflow_stage"] = "observe"
+    run_state["status"] = "ready"
+    run_state["active_phase_id"] = None
+    run_state["active_task_id"] = None
+    run_state["self_evolve"]["auto_apply_control_plane"] = False
+    (repo_root / ".hermes-flow" / "run-state.json").write_text(json.dumps(run_state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    queue = json.loads((repo_root / ".hermes-flow" / "milestone-queue.json").read_text(encoding="utf-8"))
+    queue["pending"] = []
+    queue["applied"] = []
+    queue["rejected"] = []
+    queue["deferred"] = [
+        {
+            "queue_id": "milestone-loop-cycle-099",
+            "cycle_id": "loop-cycle-099",
+            "candidate_id": "candidate-loop-cycle-099",
+            "summary": "older control-plane candidate",
+            "classification": "control_plane_policy",
+            "target_surface": ["docs/plans/"],
+            "promotion_decision": "milestone_promotion_required",
+            "status": "deferred",
+            "queued_at": "2026-04-17T09:00:00Z",
+            "review_decision": "deferred",
+            "review_reason": "need more evidence",
+            "reviewed_at": "2026-04-17T09:01:00Z",
+            "milestone_decision_dossier": {
+                "artifact_type": "milestone_decision_dossier",
+                "queue_id": "milestone-loop-cycle-099",
+                "candidate_id": "candidate-loop-cycle-099",
+                "classification": "control_plane_policy",
+                "summary": "older control-plane candidate",
+                "target_surface": ["docs/plans/"],
+                "promotion_decision": "milestone_promotion_required",
+                "stop_artifact": {
+                    "artifact_type": "milestone_stop_request",
+                    "reason": "self_evolve_policy_disabled_auto_apply",
+                },
+                "review_decision": "deferred",
+                "review_reason": "need more evidence",
+                "final_disposition": "deferred",
+                "reviewed_at": "2026-04-17T09:01:00Z",
+            },
+        }
+    ]
+    (repo_root / ".hermes-flow" / "milestone-queue.json").write_text(json.dumps(queue, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    verification_state = json.loads((repo_root / ".hermes-flow" / "verification-state.json").read_text(encoding="utf-8"))
+    verification_state["task_review_state"] = {}
+    verification_state["phase_review_state"] = {}
+    verification_state["final_acceptance"] = []
+    (repo_root / ".hermes-flow" / "verification-state.json").write_text(json.dumps(verification_state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [
+            "python3",
+            str(repo_root / "scripts" / "run_loop_core_cycle.py"),
+            "--ingest-repo-state",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    report = json.loads((repo_root / Path(proc.stdout.strip())).read_text(encoding="utf-8"))
+    assert report["candidate"]["summary"].startswith("keep milestone stop boundaries legible")
+    assert report["observation"]["evidence"]["governance_learning_signal"]["pattern"] == "governance_friction_present"
+    assert report["observation"]["evidence"]["milestone_history_summary"]["deferred_count"] == 1
+
+
 def test_run_loop_core_cycle_ingests_repo_state_and_stops_at_milestone_boundary_when_self_evolve_policy_disables_auto_apply(tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()

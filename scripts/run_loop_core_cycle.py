@@ -231,9 +231,62 @@ def ingest_execution_evidence(repo_root: Path, evidence_path: str, report_path: 
     return ingested, final_report_path
 
 
-def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, str, str, str, list[str], bool, dict[str, Any] | None]:
+def summarize_milestone_history(queue: dict[str, Any]) -> OrderedDict:
+    applied = queue.get("applied", [])
+    rejected = queue.get("rejected", [])
+    deferred = queue.get("deferred", [])
+    pending = queue.get("pending", [])
+    reviewed_entries = [*applied, *rejected, *deferred]
+    stop_reason_counts: dict[str, int] = {}
+    for entry in [*pending, *reviewed_entries]:
+        stop_artifact = entry.get("milestone_stop_artifact") or entry.get("milestone_decision_dossier", {}).get("stop_artifact")
+        if isinstance(stop_artifact, dict) and stop_artifact.get("reason"):
+            reason = str(stop_artifact["reason"])
+            stop_reason_counts[reason] = stop_reason_counts.get(reason, 0) + 1
+    return OrderedDict(
+        {
+            "pending_count": len(pending),
+            "applied_count": len(applied),
+            "rejected_count": len(rejected),
+            "deferred_count": len(deferred),
+            "reviewed_total": len(reviewed_entries),
+            "stop_reason_counts": OrderedDict(sorted(stop_reason_counts.items())),
+        }
+    )
+
+
+def build_governance_learning_signal(history_summary: dict[str, Any]) -> OrderedDict | None:
+    reviewed_total = int(history_summary.get("reviewed_total", 0))
+    if reviewed_total == 0:
+        return None
+    rejected_count = int(history_summary.get("rejected_count", 0))
+    deferred_count = int(history_summary.get("deferred_count", 0))
+    applied_count = int(history_summary.get("applied_count", 0))
+    if rejected_count or deferred_count:
+        return OrderedDict(
+            {
+                "signal_type": "governance_history_learning",
+                "pattern": "governance_friction_present",
+                "lesson": "Recent milestone history shows that some control-plane candidates do not resolve immediately into acceptance.",
+                "recommended_boundary": "keep milestone stop boundaries legible and require stronger evidence before widening autonomy",
+                "history_summary": history_summary,
+            }
+        )
+    return OrderedDict(
+        {
+            "signal_type": "governance_history_learning",
+            "pattern": "governance_flow_stable",
+            "lesson": "Recent milestone history shows accepted control-plane candidates are resolving cleanly.",
+            "recommended_boundary": "maintain current autonomy boundary while continuing to monitor review outcomes",
+            "history_summary": history_summary,
+        }
+    )
+
+
+def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, str, str, str, list[str], bool, dict[str, Any] | None, dict[str, Any] | None]:
     run_state = normalize_run_state(load_json(repo_root / RUN_STATE_PATH))
     verification_state = load_json(repo_root / VERIFICATION_STATE_PATH)
+    milestone_queue = load_json(repo_root / MILESTONE_QUEUE_PATH)
 
     task_summary = summarize_task_review_state(verification_state.get("task_review_state", {}))
     phase_summary = summarize_phase_review_state(verification_state.get("phase_review_state", {}))
@@ -249,6 +302,8 @@ def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, 
             "has_ambiguous_acceptance_state": any(item.get("result") not in {"pass", "fail"} for item in verification_state.get("final_acceptance", [])),
         }
     )
+    milestone_history_summary = summarize_milestone_history(milestone_queue)
+    governance_learning_signal = build_governance_learning_signal(milestone_history_summary)
     evidence = OrderedDict(
         {
             "source": "repo_state",
@@ -265,6 +320,8 @@ def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, 
             "task_review_summary": task_summary,
             "phase_review_summary": phase_summary,
             "verification_summary": verification_summary,
+            "milestone_history_summary": milestone_history_summary,
+            "governance_learning_signal": governance_learning_signal,
             "captured_at": utc_now(),
         }
     )
@@ -282,6 +339,9 @@ def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, 
 
     if task_summary["blocking_bug_count"] or phase_summary["blocking_bug_count"]:
         candidate_summary = "tighten review and verification governance based on repo-state blockers"
+        classification = "control_plane_policy"
+    elif governance_learning_signal and governance_learning_signal.get("pattern") == "governance_friction_present":
+        candidate_summary = "keep milestone stop boundaries legible based on historical governance friction"
         classification = "control_plane_policy"
     elif (
         task_summary["has_reviews"]
@@ -320,7 +380,7 @@ def build_loop_candidate_from_repo_state(repo_root: Path) -> tuple[OrderedDict, 
         )
 
     target_surface = list(DEFAULT_TARGET_SURFACES[classification])
-    return evidence, observation, candidate_summary, classification, target_surface, should_stop_at_milestone, milestone_stop_artifact
+    return evidence, observation, candidate_summary, classification, target_surface, should_stop_at_milestone, milestone_stop_artifact, governance_learning_signal
 
 
 def queue_milestone_candidate(repo_root: Path, cycle_id: str, candidate_record: dict[str, Any], promotion_record: dict[str, Any], milestone_stop_artifact: dict[str, Any] | None = None) -> OrderedDict:
@@ -714,10 +774,11 @@ def main() -> int:
     repo_run_state = None
     repo_state_requested_stop = False
     milestone_stop_artifact = None
+    governance_learning_signal = None
 
     if args.ingest_repo_state:
         repo_run_state = normalize_run_state(load_json(repo_root / RUN_STATE_PATH))
-        evidence, observation, candidate_summary, classification, target_surface, repo_state_requested_stop, milestone_stop_artifact = build_loop_candidate_from_repo_state(repo_root)
+        evidence, observation, candidate_summary, classification, target_surface, repo_state_requested_stop, milestone_stop_artifact, governance_learning_signal = build_loop_candidate_from_repo_state(repo_root)
 
     auto_apply_queued_milestone = should_auto_apply_milestone(
         args.mode,
